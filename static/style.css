@@ -659,6 +659,120 @@ th.sorted-desc::after {
     font-size: 11px;
 }
 
+/* Provider color dot */
+.provider-dot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* Balance tracker header with sort */
+.balance-tracker-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.balance-sort-controls {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.balance-sort-select {
+    padding: 3px 8px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+/* Balance toggle (hide/show) */
+.balance-toggle {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 3px;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    line-height: 1;
+}
+
+.balance-toggle:hover {
+    border-color: var(--accent-blue);
+    color: var(--accent-blue);
+}
+
+/* Hidden balance card */
+.balance-card.balance-hidden {
+    opacity: 0.5;
+    max-width: 180px;
+    min-width: 140px;
+}
+
+/* Voucher entry styling */
+.balance-ledger-voucher .balance-ledger-amount {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+/* Range filter inputs */
+.range-input {
+    width: 70px;
+    padding: 3px 6px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 11px;
+}
+
+.range-input:focus {
+    outline: none;
+    border-color: var(--accent-blue);
+}
+
+/* Per page select */
+.per-page-select {
+    padding: 3px 8px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+/* Time series navigation */
+.ts-range-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.ts-nav-btn {
+    padding: 2px 8px;
+    font-size: 11px;
+    min-width: unset;
+}
+
+.ts-range-label {
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
 /* Section headers */
 
 .section-title {

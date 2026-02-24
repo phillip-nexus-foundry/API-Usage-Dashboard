@@ -155,23 +155,36 @@ async def timeseries(
     interval: str = Query("hour"),
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
     Time-bucketed data for line/bar charts.
-    Interval: minute, hour, day. Supports provider/model filters.
+    Interval: minute, hour, day, week, month. Supports provider/model filters and time range.
+    Returns per-provider cost breakdown for stacked charts.
     """
     bucket_size = {
         "minute": 60,
         "hour": 3600,
         "day": 86400,
+        "week": 604800,
+        "month": 2592000,  # ~30 days
     }.get(interval, 3600)
 
     where, params = _build_filter(provider, model)
 
+    # Add time range filters
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
+
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
 
-        # Bucket by timestamp and aggregate
+        # Aggregate totals per bucket
         cursor.execute(f"""
             SELECT
                 (timestamp / 1000 / {bucket_size}) * {bucket_size} * 1000 as bucket,
@@ -183,7 +196,7 @@ async def timeseries(
             GROUP BY bucket
             ORDER BY bucket ASC
         """, params)
-        
+
         data = []
         for row in cursor.fetchall():
             data.append({
@@ -193,8 +206,32 @@ async def timeseries(
                 "tokens": row[3] or 0,
                 "errors": row[4],
             })
-    
-    return {"interval": interval, "data": data}
+
+        # Per-provider cost breakdown per bucket (for stacked bar chart)
+        cursor.execute(f"""
+            SELECT
+                (timestamp / 1000 / {bucket_size}) * {bucket_size} * 1000 as bucket,
+                provider,
+                SUM(cost_total) as cost
+            FROM records{where}
+            GROUP BY bucket, provider
+            ORDER BY bucket ASC
+        """, params)
+
+        provider_costs = {}
+        for row in cursor.fetchall():
+            bucket_ts = int(row[0])
+            prov = row[1]
+            cost = round(row[2] or 0, 6)
+            if prov not in provider_costs:
+                provider_costs[prov] = {}
+            provider_costs[prov][bucket_ts] = cost
+
+    return {
+        "interval": interval,
+        "data": data,
+        "provider_costs": provider_costs,
+    }
 
 
 @app.get("/api/calls")
@@ -203,10 +240,14 @@ async def calls(
     per_page: int = Query(50, ge=1, le=500),
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    min_tokens: Optional[int] = Query(None),
+    max_tokens: Optional[int] = Query(None),
+    min_cost: Optional[float] = Query(None),
+    max_cost: Optional[float] = Query(None),
 ):
     """
     Paginated individual call list with all 24 fields.
-    Supports optional provider and model filters.
+    Supports provider, model, token range, and cost range filters.
     """
     offset = (page - 1) * per_page
 
@@ -219,6 +260,18 @@ async def calls(
     if model:
         where_clauses.append("model = ?")
         params.append(model)
+    if min_tokens is not None:
+        where_clauses.append("tokens_total >= ?")
+        params.append(min_tokens)
+    if max_tokens is not None:
+        where_clauses.append("tokens_total <= ?")
+        params.append(max_tokens)
+    if min_cost is not None:
+        where_clauses.append("cost_total >= ?")
+        params.append(min_cost)
+    if max_cost is not None:
+        where_clauses.append("cost_total <= ?")
+        params.append(max_cost)
     where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
     with sqlite3.connect(reader.db_path) as conn:
@@ -420,7 +473,8 @@ async def tools(
 async def balance():
     """
     Provider balances + alert evaluation.
-    Includes ledger history for providers that use ledger tracking.
+    Includes ledger, usage stats, and spending totals per provider.
+    Also includes providers from DB that may not have balance config.
     """
     balances = await balance_checker.check_balances(reader)
 
@@ -429,6 +483,27 @@ async def balance():
     for provider_name, provider_cfg in balance_cfg.items():
         if isinstance(provider_cfg, dict) and provider_cfg.get("ledger"):
             balances.setdefault(provider_name, {})["ledger"] = provider_cfg["ledger"]
+            # Separate personal spending from vouchers
+            personal = sum(
+                e.get("amount", 0) for e in provider_cfg["ledger"]
+                if not e.get("is_voucher")
+            )
+            balances[provider_name]["personal_invested"] = round(personal, 2)
+
+    # Add usage stats (calls, cost) for ALL providers in the DB
+    with sqlite3.connect(reader.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT provider, COUNT(*) as calls, COALESCE(SUM(cost_total), 0) as cost,
+                   COALESCE(SUM(tokens_total), 0) as tokens
+            FROM records GROUP BY provider ORDER BY calls DESC
+        """)
+        for row in cursor.fetchall():
+            prov = row[0]
+            balances.setdefault(prov, {})
+            balances[prov]["usage_calls"] = row[1]
+            balances[prov]["usage_cost"] = round(row[2], 6)
+            balances[prov]["usage_tokens"] = row[3]
 
     return balances
 

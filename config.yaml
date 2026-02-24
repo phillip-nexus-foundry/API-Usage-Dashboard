@@ -21,11 +21,18 @@ balance:
     api_key_env: "MOONSHOT_API_KEY"
     ledger:
       - date: "2026-02-01"
-        amount: 45.00
-        note: "Initial $40 + $5 voucher"
+        amount: 20.00
+        note: "First top-up"
+      - date: "2026-02-01"
+        amount: 20.00
+        note: "Second top-up"
+      - date: "2026-02-01"
+        amount: 5.00
+        note: "Free voucher (not personal funds)"
+        is_voucher: true
       - date: "2026-02-15"
         amount: 50.00
-        note: "Top-up"
+        note: "Third top-up"
     warn_threshold: 10.00
     critical_threshold: 2.00
 
