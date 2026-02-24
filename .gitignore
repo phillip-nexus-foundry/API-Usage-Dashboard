@@ -1,0 +1,26 @@
+# Database (auto-generated)
+dashboard.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Environment / secrets
+.env
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug / temp scripts
+debug_*.py
+check_*.py
+test_*.py

@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  dashboard:
+    build: .
+    container_name: api-usage-dashboard
+    ports:
+      - "127.0.0.1:8050:8050"
+    volumes:
+      - ~/.openclaw:/root/.openclaw:ro
+    environment:
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+    restart: unless-stopped
+
+  # Optional: Prometheus + Grafana stack (enable with --profile full)
+  prometheus:
+    image: prom/prometheus:latest
+    profiles:
+      - full
+    container_name: api-dashboard-prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    profiles:
+      - full
+    container_name: api-dashboard-grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+
+volumes:
+  prometheus_data:
+  grafana_data:

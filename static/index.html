@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Usage Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>📊 API Usage Dashboard</h1>
+        <div class="header-controls">
+            <div style="display: flex; gap: 8px;">
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary);">
+                    <input type="checkbox" id="utcToggle" style="cursor: pointer;">
+                    UTC (local by default)
+                </label>
+            </div>
+            <button class="btn" id="refreshBtn">🔄 Refresh Now</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <!-- Filters -->
+        <div class="filters">
+            <div class="filter-group">
+                <label>Provider</label>
+                <select id="filterProvider">
+                    <option value="">All Providers</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Model</label>
+                <select id="filterModel">
+                    <option value="">All Models</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label>Interval</label>
+                <select id="filterInterval">
+                    <option value="minute">Minute</option>
+                    <option value="hour" selected>Hour</option>
+                    <option value="day">Day</option>
+                </select>
+            </div>
+        </div>
+
+        <!-- Row 0: Balance Tracker (compact, dynamic) -->
+        <div class="card balance-tracker-card">
+            <div class="card-title">Balance Tracker</div>
+            <div id="balanceTracker" class="balance-tracker"></div>
+        </div>
+
+        <!-- Row 1: KPI Cards -->
+        <div class="grid" style="margin-top: 12px;">
+            <div class="grid-item" style="grid-column: span 2;">
+                <div class="card">
+                    <div class="card-title">Total Calls</div>
+                    <div class="card-value" id="kpiCalls">—</div>
+                    <div class="card-meta" id="kpiCallsMeta"></div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 2;">
+                <div class="card">
+                    <div class="card-title">Total Cost</div>
+                    <div class="card-value" id="kpiCost">—</div>
+                    <div class="card-meta" id="kpiCostMeta"></div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 2;">
+                <div class="card">
+                    <div class="card-title">Error Rate</div>
+                    <div class="card-value" id="kpiErrorRate">—</div>
+                    <div class="card-meta" id="kpiErrorRateMeta"></div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 2;">
+                <div class="card">
+                    <div class="card-title">Cache Hit %</div>
+                    <div class="card-value" id="kpiCacheHit">—</div>
+                    <div class="card-meta" id="kpiCacheHitMeta"></div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 2;">
+                <div class="card">
+                    <div class="card-title">Sessions</div>
+                    <div class="card-value" id="kpiSessions">—</div>
+                    <div class="card-meta" id="kpiSessionsMeta"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 2: Time Series -->
+        <div class="grid">
+            <div class="grid-item" style="grid-column: span 6;">
+                <div class="card">
+                    <div class="card-title">Token Time Series</div>
+                    <div class="chart-container">
+                        <canvas id="tokenTimeSeriesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 6;">
+                <div class="card">
+                    <div class="card-title">Cost Over Time (Stacked)</div>
+                    <div class="chart-container">
+                        <canvas id="costTimeSeriesChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 3: Distribution Charts -->
+        <div class="grid">
+            <div class="grid-item" style="grid-column: span 4;">
+                <div class="card">
+                    <div class="card-title">By Provider</div>
+                    <div class="chart-container">
+                        <canvas id="byProviderChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 4;">
+                <div class="card">
+                    <div class="card-title">By Model</div>
+                    <div class="chart-container">
+                        <canvas id="byModelChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 4;">
+                <div class="card">
+                    <div class="card-title">Stop Reasons</div>
+                    <div class="chart-container">
+                        <canvas id="stopReasonsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 4: Evaluation Scores -->
+        <div class="grid">
+            <div class="grid-item" style="grid-column: span 12;">
+                <div class="card">
+                    <div class="card-title">Evaluation Scores</div>
+                    <div class="chart-container">
+                        <canvas id="evalScoresChart"></canvas>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 5: Tools & Projection -->
+        <div class="grid">
+            <div class="grid-item" style="grid-column: span 6;">
+                <div class="card">
+                    <div class="card-title">Top Tools</div>
+                    <div class="chart-container">
+                        <canvas id="topToolsChart"></canvas>
+                    </div>
+                </div>
+            </div>
+            <div class="grid-item" style="grid-column: span 6;">
+                <div class="card">
+                    <div class="card-title">Monthly Cost Projection</div>
+                    <div id="projectionContainer" style="padding: 20px; text-align: center;">
+                        <div style="font-size: 32px; font-weight: 600; color: var(--accent-blue);" id="projectionCost">—</div>
+                        <div style="font-size: 12px; color: var(--text-secondary); margin-top: 8px;" id="projectionNote"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Row 6: Call Log Table -->
+        <div class="grid">
+            <div class="grid-item" style="grid-column: span 12;">
+                <div class="card">
+                    <div class="card-title">Call Log</div>
+                    <div class="table-wrapper">
+                        <table id="callLogTable">
+                            <thead>
+                                <tr>
+                                    <th class="sortable" data-field="timestamp_iso">Timestamp</th>
+                                    <th class="sortable" data-field="provider">Provider</th>
+                                    <th class="sortable" data-field="model">Model</th>
+                                    <th class="sortable" data-field="tokens_total">Tokens</th>
+                                    <th class="sortable" data-field="cost_total">Cost</th>
+                                    <th class="sortable" data-field="stop_reason">Status</th>
+                                    <th>Tools</th>
+                                </tr>
+                            </thead>
+                            <tbody id="callLogBody">
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination" id="paginationControls"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
