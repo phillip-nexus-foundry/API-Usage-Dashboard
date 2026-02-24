@@ -469,6 +469,15 @@ th.sorted-desc::after {
     color: var(--accent-blue);
 }
 
+/* KPI header */
+.kpi-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding: 0 2px;
+}
+
 /* Balance Tracker */
 
 .balance-tracker-card {
@@ -478,12 +487,32 @@ th.sorted-desc::after {
 .balance-tracker {
     display: flex;
     gap: 12px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-behavior: smooth;
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-color) transparent;
+    padding-bottom: 4px;
+}
+
+.balance-tracker::-webkit-scrollbar {
+    height: 4px;
+}
+
+.balance-tracker::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.balance-tracker::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 2px;
 }
 
 .balance-card {
-    flex: 1;
-    min-width: 220px;
+    flex: 0 0 calc(33.333% - 8px);
+    min-width: 260px;
+    max-width: 380px;
     background-color: var(--bg-secondary);
     border: 1px solid var(--border-color);
     border-radius: 6px;
@@ -631,18 +660,18 @@ th.sorted-desc::after {
 
 .topup-fields {
     display: flex;
-    gap: 6px;
+    gap: 4px;
     align-items: center;
 }
 
 .topup-input {
-    padding: 4px 8px;
+    padding: 4px 6px;
     background-color: var(--bg-hover);
     border: 1px solid var(--border-color);
     color: var(--text-primary);
     border-radius: 4px;
-    font-size: 12px;
-    flex: 1;
+    font-size: 11px;
+    min-width: 0;
 }
 
 .topup-input:focus {
@@ -650,13 +679,39 @@ th.sorted-desc::after {
     border-color: var(--accent-blue);
 }
 
-.topup-input[type="number"] {
-    max-width: 90px;
+.topup-input.topup-amount {
+    width: 60px;
+    flex: 0 0 60px;
+}
+
+.topup-input.topup-note {
+    flex: 1 1 60px;
+    min-width: 40px;
 }
 
 .topup-btn {
     padding: 4px 10px;
     font-size: 11px;
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+/* Project selector in balance cards */
+.project-selector {
+    width: 100%;
+    padding: 4px 8px;
+    margin-bottom: 6px;
+    background-color: var(--bg-hover);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.project-selector:focus {
+    outline: none;
+    border-color: var(--accent-blue);
 }
 
 /* Provider color dot */
@@ -676,6 +731,40 @@ th.sorted-desc::after {
     margin-bottom: 8px;
 }
 
+.balance-header-right {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+}
+
+.balance-toggles {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    flex-wrap: wrap;
+}
+
+.balance-toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.balance-toggle-label input[type="checkbox"] {
+    cursor: pointer;
+    width: 13px;
+    height: 13px;
+}
+
+.balance-toggle-label span {
+    text-transform: capitalize;
+}
+
 .balance-sort-controls {
     display: flex;
     gap: 6px;
@@ -692,39 +781,34 @@ th.sorted-desc::after {
     cursor: pointer;
 }
 
-/* Balance toggle (hide/show) */
-.balance-toggle {
-    width: 18px;
-    height: 18px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    border-radius: 3px;
-    cursor: pointer;
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-secondary);
-    background: var(--bg-hover);
-    border: 1px solid var(--border-color);
-    line-height: 1;
-}
-
-.balance-toggle:hover {
-    border-color: var(--accent-blue);
-    color: var(--accent-blue);
-}
-
-/* Hidden balance card */
-.balance-card.balance-hidden {
-    opacity: 0.5;
-    max-width: 180px;
-    min-width: 140px;
-}
+/* (toggle checkboxes are now in .balance-toggles above the panel) */
 
 /* Voucher entry styling */
 .balance-ledger-voucher .balance-ledger-amount {
     color: var(--text-secondary);
     font-style: italic;
+}
+
+/* Ledger delete button */
+.ledger-delete-btn {
+    background: none;
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--accent-red);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 700;
+    padding: 0 5px;
+    line-height: 1.4;
+    opacity: 0.7;
+    transition: opacity 0.2s, background-color 0.2s;
+    flex-shrink: 0;
+    margin-left: 6px;
+}
+
+.ledger-delete-btn:hover {
+    opacity: 1;
+    background-color: rgba(248, 81, 73, 0.15);
 }
 
 /* Range filter inputs */
@@ -771,6 +855,16 @@ th.sorted-desc::after {
 .ts-range-label {
     font-size: 11px;
     color: var(--text-secondary);
+    min-width: 180px;
+    text-align: center;
+}
+
+.ts-zoom {
+    margin-left: 4px;
+    font-size: 13px;
+    font-weight: 700;
+    min-width: 24px;
+    padding: 2px 6px;
 }
 
 /* Section headers */
@@ -782,6 +876,133 @@ th.sorted-desc::after {
     color: var(--text-primary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+/* Rate Limits Section */
+
+.rate-limit-card {
+    margin-bottom: 12px;
+}
+
+.rate-limit-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.rate-limit-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 10px;
+}
+
+.rate-limit-model-card {
+    background-color: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 10px 14px;
+    position: relative;
+}
+
+.rl-model-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 8px;
+    padding-right: 24px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rl-auto-badge {
+    font-size: 9px;
+    font-weight: 500;
+    color: var(--accent-green);
+    background: rgba(63, 185, 80, 0.12);
+    border: 1px solid rgba(63, 185, 80, 0.3);
+    border-radius: 8px;
+    padding: 1px 6px;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+
+.rl-meter-label.rl-sub {
+    font-size: 9px;
+    color: var(--text-secondary);
+    min-width: 50px;
+}
+
+.rl-family-models {
+    font-size: 10px;
+    color: var(--text-secondary);
+    margin-bottom: 6px;
+    line-height: 1.3;
+    opacity: 0.7;
+}
+
+.rl-meters {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.rl-meter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.rl-meter-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    min-width: 28px;
+    text-transform: uppercase;
+}
+
+.rl-meter-bar {
+    flex: 1;
+    height: 6px;
+    background-color: var(--bg-hover);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.rl-meter-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.rl-meter-fill.rl-ok { background-color: var(--accent-green); }
+.rl-meter-fill.rl-warn { background-color: var(--accent-orange); }
+.rl-meter-fill.rl-critical { background-color: var(--accent-red); }
+
+.rl-meter-value {
+    font-size: 10px;
+    color: var(--text-secondary);
+    min-width: 90px;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.rl-edit-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-size: 12px;
+}
+
+.rate-limit-form {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border-color);
+    flex-wrap: wrap;
 }
 
 /* Mobile adjustments */

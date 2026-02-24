@@ -4,8 +4,10 @@ FastAPI application for API Usage Dashboard.
 """
 import os
 import json
+import time
 import yaml
 import logging
+import threading
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from pathlib import Path
@@ -20,6 +22,119 @@ import sqlite3
 from parsers.openclaw_reader import OpenClawReader
 from balance.checker import BalanceChecker
 from evals.evaluator import Evaluator
+
+
+# ============================================================================
+# RATE LIMIT AUTO-DETECTION
+# ============================================================================
+
+# Known Anthropic model families and a representative model to probe for each
+ANTHROPIC_FAMILIES = {
+    "claude-opus": {
+        "probe_model": "claude-opus-4-6",
+        "models": ["claude-opus-4-6"],
+    },
+    "claude-sonnet": {
+        "probe_model": "claude-sonnet-4-6",
+        "models": ["claude-sonnet-4-6", "claude-3-5-sonnet-20241022"],
+    },
+    "claude-haiku": {
+        "probe_model": "claude-haiku-4-5-20251001",
+        "models": ["claude-haiku-4-5", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022", "claude-3-haiku-20240307"],
+    },
+}
+
+
+async def probe_anthropic_rate_limits() -> Dict[str, Any]:
+    """
+    Probe Anthropic API with a minimal request per model family to read
+    actual rate limit headers. Returns detected limits per family.
+    """
+    import httpx as _httpx
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        logger.info("ANTHROPIC_API_KEY not set, skipping rate limit auto-detection")
+        return {}
+
+    detected = {}
+    for family_name, family_info in ANTHROPIC_FAMILIES.items():
+        probe_model = family_info["probe_model"]
+        try:
+            async with _httpx.AsyncClient() as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": probe_model,
+                        "max_tokens": 1,
+                        "messages": [{"role": "user", "content": "hi"}],
+                    },
+                    timeout=15.0,
+                )
+
+                rpm = resp.headers.get("anthropic-ratelimit-requests-limit")
+                tpm = resp.headers.get("anthropic-ratelimit-tokens-limit")
+                input_tpm = resp.headers.get("anthropic-ratelimit-input-tokens-limit")
+                output_tpm = resp.headers.get("anthropic-ratelimit-output-tokens-limit")
+
+                limits = {}
+                if rpm:
+                    limits["rpm"] = int(rpm)
+                if tpm:
+                    limits["tpm"] = int(tpm)
+                if input_tpm:
+                    limits["input_tpm"] = int(input_tpm)
+                if output_tpm:
+                    limits["output_tpm"] = int(output_tpm)
+                limits["models"] = family_info["models"]
+                limits["auto_detected"] = True
+
+                detected[family_name] = limits
+                logger.info(f"Auto-detected {family_name} rate limits: RPM={rpm} TPM={tpm} InputTPM={input_tpm} OutputTPM={output_tpm}")
+
+        except Exception as e:
+            logger.warning(f"Failed to probe rate limits for {family_name}: {e}")
+
+    return detected
+
+
+async def apply_auto_detected_limits():
+    """
+    Probe APIs for rate limits and merge into CONFIG.
+    Auto-detected values are used unless the user has manually overridden them.
+    """
+    global CONFIG
+
+    detected = await probe_anthropic_rate_limits()
+    if not detected:
+        return
+
+    if "rate_limits" not in CONFIG:
+        CONFIG["rate_limits"] = {}
+
+    changed = False
+    for family_name, detected_limits in detected.items():
+        existing = CONFIG["rate_limits"].get(family_name, {})
+
+        # Update if: family doesn't exist yet, was previously auto-detected,
+        # or has never been explicitly marked (first run before any auto-detection)
+        if not existing or existing.get("auto_detected") or "auto_detected" not in existing:
+            CONFIG["rate_limits"][family_name] = detected_limits
+            changed = True
+        # else: Family was manually edited (auto_detected explicitly removed) — skip
+
+    if changed:
+        try:
+            with open(config_path, "w") as f:
+                yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+            logger.info("Saved auto-detected rate limits to config.yaml")
+        except Exception as e:
+            logger.error(f"Failed to save auto-detected rate limits: {e}")
 
 
 # Setup logging
@@ -68,11 +183,45 @@ def _build_filter(provider: Optional[str] = None, model: Optional[str] = None):
 
 @app.on_event("startup")
 async def startup():
-    """Parse session files on startup."""
+    """Parse session files and start file watcher."""
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
     logger.info("Scanning session files...")
     reader.scan()
     if reader.parse_errors:
         logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
+
+    # File watcher: auto-scan when session files change
+    class SessionFileHandler(FileSystemEventHandler):
+        def __init__(self):
+            self._timer = None
+        def _debounced_scan(self):
+            """Debounce: wait 1s after last change before scanning."""
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(1.0, self._do_scan)
+            self._timer.start()
+        def _do_scan(self):
+            logger.info("File change detected, rescanning...")
+            reader.scan()
+        def on_modified(self, event):
+            if event.src_path.endswith('.jsonl'):
+                self._debounced_scan()
+        def on_created(self, event):
+            if event.src_path.endswith('.jsonl'):
+                self._debounced_scan()
+
+    observer = Observer()
+    observer.schedule(SessionFileHandler(), CONFIG["sessions_dir"], recursive=False)
+    observer.daemon = True
+    observer.start()
+    logger.info(f"Watching {CONFIG['sessions_dir']} for changes")
+
+    # Auto-detect rate limits from provider APIs
+    logger.info("Probing APIs for rate limits...")
+    await apply_auto_detected_limits()
+
     logger.info("Startup complete")
 
 
@@ -91,12 +240,20 @@ async def dashboard():
 async def summary(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
     Aggregate KPIs: total calls, cost, tokens, error rate, by-provider, by-model.
-    Supports optional provider/model filters.
+    Supports optional provider/model filters and time range.
     """
     where, params = _build_filter(provider, model)
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -105,11 +262,12 @@ async def summary(
         cursor.execute(f"""
             SELECT COUNT(*), COALESCE(SUM(cost_total),0), COALESCE(SUM(tokens_total),0),
                    SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END),
-                   COUNT(DISTINCT session_id)
+                   COUNT(DISTINCT session_id),
+                   MIN(timestamp), MAX(timestamp)
             FROM records{where}
         """, params)
         row = cursor.fetchone()
-        total_calls, total_cost, total_tokens, error_count, session_count = row
+        total_calls, total_cost, total_tokens, error_count, session_count, earliest_ts, latest_ts = row
         error_rate = round(error_count / total_calls, 4) if total_calls > 0 else 0.0
 
         # By provider (filtered)
@@ -145,6 +303,8 @@ async def summary(
         "error_count": error_count,
         "session_count": session_count,
         "parse_errors": len(reader.parse_errors),
+        "earliest_timestamp": earliest_ts,
+        "latest_timestamp": latest_ts,
         "by_provider": by_provider,
         "by_model": by_model,
     }
@@ -227,10 +387,33 @@ async def timeseries(
                 provider_costs[prov] = {}
             provider_costs[prov][bucket_ts] = cost
 
+        # Per-provider token breakdown per bucket (for multi-provider token chart)
+        cursor.execute(f"""
+            SELECT
+                (timestamp / 1000 / {bucket_size}) * {bucket_size} * 1000 as bucket,
+                provider,
+                SUM(tokens_total) as tokens,
+                SUM(cost_total) as cost
+            FROM records{where}
+            GROUP BY bucket, provider
+            ORDER BY bucket ASC
+        """, params)
+
+        provider_tokens = {}
+        for row in cursor.fetchall():
+            bucket_ts = int(row[0])
+            prov = row[1]
+            tokens = row[2] or 0
+            cost = round(row[3] or 0, 6)
+            if prov not in provider_tokens:
+                provider_tokens[prov] = {}
+            provider_tokens[prov][bucket_ts] = {"tokens": tokens, "cost": cost}
+
     return {
         "interval": interval,
         "data": data,
         "provider_costs": provider_costs,
+        "provider_tokens": provider_tokens,
     }
 
 
@@ -244,10 +427,12 @@ async def calls(
     max_tokens: Optional[int] = Query(None),
     min_cost: Optional[float] = Query(None),
     max_cost: Optional[float] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
     Paginated individual call list with all 24 fields.
-    Supports provider, model, token range, and cost range filters.
+    Supports provider, model, token range, cost range, and time range filters.
     """
     offset = (page - 1) * per_page
 
@@ -260,6 +445,12 @@ async def calls(
     if model:
         where_clauses.append("model = ?")
         params.append(model)
+    if start is not None:
+        where_clauses.append("timestamp >= ?")
+        params.append(start)
+    if end is not None:
+        where_clauses.append("timestamp <= ?")
+        params.append(end)
     if min_tokens is not None:
         where_clauses.append("tokens_total >= ?")
         params.append(min_tokens)
@@ -396,11 +587,19 @@ async def session_detail(session_id: str):
 async def models(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
-    Per-model breakdown: calls, tokens, cost, error rate. Supports provider/model filters.
+    Per-model breakdown: calls, tokens, cost, error rate. Supports provider/model/time filters.
     """
     where, params = _build_filter(provider, model)
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -438,12 +637,20 @@ async def models(
 async def tools(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
-    Tool usage frequency breakdown. Supports provider/model filters.
+    Tool usage frequency breakdown. Supports provider/model/time filters.
     """
     where, params = _build_filter(provider, model)
-    # Add tool_names filter on top of provider/model
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
+    # Add tool_names filter on top of other filters
     extra = " AND tool_names IS NOT NULL AND tool_names != '[]'" if where else " WHERE tool_names IS NOT NULL AND tool_names != '[]'"
 
     with sqlite3.connect(reader.db_path) as conn:
@@ -481,9 +688,31 @@ async def balance():
     # Attach ledger history for any provider that has one
     balance_cfg = CONFIG.get("balance", {})
     for provider_name, provider_cfg in balance_cfg.items():
-        if isinstance(provider_cfg, dict) and provider_cfg.get("ledger"):
+        if not isinstance(provider_cfg, dict):
+            continue
+        if provider_cfg.get("projects"):
+            # Multi-project provider: projects already populated by checker
+            # Build a combined ledger with project tags for the card header
+            combined_ledger = []
+            for proj_name, proj_cfg in provider_cfg["projects"].items():
+                if not isinstance(proj_cfg, dict):
+                    continue
+                for entry in proj_cfg.get("ledger", []):
+                    tagged = dict(entry)
+                    tagged["project"] = proj_name
+                    combined_ledger.append(tagged)
+            balances.setdefault(provider_name, {})["ledger"] = combined_ledger
+            # Aggregate personal_invested across projects
+            total_personal = 0.0
+            for proj_name, proj_cfg in provider_cfg["projects"].items():
+                if isinstance(proj_cfg, dict):
+                    total_personal += sum(
+                        e.get("amount", 0) for e in proj_cfg.get("ledger", [])
+                        if not e.get("is_voucher")
+                    )
+            balances[provider_name]["personal_invested"] = round(total_personal, 2)
+        elif provider_cfg.get("ledger"):
             balances.setdefault(provider_name, {})["ledger"] = provider_cfg["ledger"]
-            # Separate personal spending from vouchers
             personal = sum(
                 e.get("amount", 0) for e in provider_cfg["ledger"]
                 if not e.get("is_voucher")
@@ -505,6 +734,27 @@ async def balance():
             balances[prov]["usage_cost"] = round(row[2], 6)
             balances[prov]["usage_tokens"] = row[3]
 
+        # For multi-project providers, also add per-project usage stats
+        for provider_name, provider_cfg in balance_cfg.items():
+            if not isinstance(provider_cfg, dict) or not provider_cfg.get("projects"):
+                continue
+            for proj_name, proj_cfg in provider_cfg["projects"].items():
+                if not isinstance(proj_cfg, dict):
+                    continue
+                proj_models = proj_cfg.get("models", [])
+                if not proj_models:
+                    continue
+                placeholders = ",".join("?" * len(proj_models))
+                cursor.execute(f"""
+                    SELECT COUNT(*), COALESCE(SUM(cost_total), 0), COALESCE(SUM(tokens_total), 0)
+                    FROM records WHERE model IN ({placeholders})
+                """, proj_models)
+                row = cursor.fetchone()
+                proj_data = balances.get(provider_name, {}).get("projects", {}).get(proj_name, {})
+                proj_data["usage_calls"] = row[0]
+                proj_data["usage_cost"] = round(row[1], 6)
+                proj_data["usage_tokens"] = row[2]
+
     return balances
 
 
@@ -513,10 +763,11 @@ async def balance_topup(
     provider: str = Body(...),
     amount: float = Body(...),
     note: str = Body(""),
+    project: Optional[str] = Body(None),
 ):
     """
     Add a top-up entry to a provider's ledger in config.yaml.
-    Only works for providers that use ledger-based tracking (e.g. Anthropic).
+    For multi-project providers, specify which project to add to.
     """
     global CONFIG
 
@@ -526,11 +777,24 @@ async def balance_topup(
     if provider_cfg is None:
         return {"error": f"Unknown provider: {provider}", "status": 400}
 
-    if "ledger" not in provider_cfg:
-        return {"error": f"Provider '{provider}' uses API-based balance (no manual ledger)", "status": 400}
-
     if amount <= 0:
         return {"error": "Amount must be positive", "status": 400}
+
+    # Determine which ledger to append to
+    if provider_cfg.get("projects"):
+        if not project:
+            proj_names = list(provider_cfg["projects"].keys())
+            return {"error": f"Specify a project: {', '.join(proj_names)}", "status": 400}
+        proj_cfg = provider_cfg["projects"].get(project)
+        if not proj_cfg:
+            return {"error": f"Unknown project '{project}' for {provider}", "status": 400}
+        if "ledger" not in proj_cfg:
+            proj_cfg["ledger"] = []
+        target_ledger = proj_cfg["ledger"]
+    elif "ledger" in provider_cfg:
+        target_ledger = provider_cfg["ledger"]
+    else:
+        return {"error": f"Provider '{provider}' has no ledger configured", "status": 400}
 
     # Create new ledger entry
     entry = {
@@ -541,25 +805,72 @@ async def balance_topup(
         entry["note"] = note
 
     # Append to in-memory config
-    provider_cfg["ledger"].append(entry)
+    target_ledger.append(entry)
 
     # Write back to config.yaml
     try:
         with open(config_path, "w") as f:
             yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
     except Exception as e:
-        # Roll back the in-memory change
-        provider_cfg["ledger"].pop()
+        target_ledger.pop()
         logger.error(f"Failed to write config.yaml: {e}")
         return {"error": f"Failed to save: {e}", "status": 500}
 
-    logger.info(f"Added top-up for {provider}: ${amount:.2f} ({note})")
+    logger.info(f"Added top-up for {provider}{f'/{project}' if project else ''}: ${amount:.2f} ({note})")
 
-    # Return updated balance
     updated = await balance_checker.check_balances(reader)
-    # Attach ledger for the updated provider
-    updated.setdefault(provider, {})["ledger"] = provider_cfg.get("ledger", [])
     return {"status": "ok", "entry": entry, "balances": updated}
+
+
+@app.post("/api/balance/topup/delete")
+async def balance_topup_delete(
+    provider: str = Body(...),
+    index: int = Body(..., description="0-based index of the ledger entry to remove"),
+    project: Optional[str] = Body(None),
+):
+    """
+    Remove a ledger entry by index from a provider's ledger in config.yaml.
+    For multi-project providers, specify which project's ledger.
+    """
+    global CONFIG
+
+    balance_cfg = CONFIG.get("balance", {})
+    provider_cfg = balance_cfg.get(provider)
+
+    if provider_cfg is None:
+        return {"error": f"Unknown provider: {provider}", "status": 400}
+
+    # Determine which ledger to operate on
+    if provider_cfg.get("projects"):
+        if not project:
+            return {"error": "Specify which project's ledger entry to remove", "status": 400}
+        proj_cfg = provider_cfg["projects"].get(project)
+        if not proj_cfg:
+            return {"error": f"Unknown project '{project}' for {provider}", "status": 400}
+        ledger = proj_cfg.get("ledger")
+    else:
+        ledger = provider_cfg.get("ledger")
+
+    if not ledger:
+        return {"error": f"No ledger entries found", "status": 400}
+
+    if index < 0 or index >= len(ledger):
+        return {"error": f"Invalid index {index} (ledger has {len(ledger)} entries)", "status": 400}
+
+    removed = ledger.pop(index)
+
+    try:
+        with open(config_path, "w") as f:
+            yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        ledger.insert(index, removed)
+        logger.error(f"Failed to write config.yaml: {e}")
+        return {"error": f"Failed to save: {e}", "status": 500}
+
+    logger.info(f"Removed ledger entry #{index} from {provider}{f'/{project}' if project else ''}: ${removed.get('amount', 0):.2f}")
+
+    updated = await balance_checker.check_balances(reader)
+    return {"status": "ok", "removed": removed, "balances": updated}
 
 
 @app.get("/api/evals")
@@ -575,11 +886,19 @@ async def evals():
 async def cost_daily(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
-    Daily cost breakdown by provider/model. Supports provider/model filters.
+    Daily cost breakdown by provider/model. Supports provider/model/time filters.
     """
     where, params = _build_filter(provider, model)
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -613,11 +932,19 @@ async def cost_daily(
 async def cost_projection(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
+    end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
-    Monthly projection from 7-day trailing average. Supports provider/model filters.
+    Monthly projection from 7-day trailing average. Supports provider/model/time filters.
     """
     where, params = _build_filter(provider, model)
+    if start:
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(start)
+    if end:
+        where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
+        params.append(end)
     # Add the 7-day window filter
     time_filter = " AND timestamp > (SELECT MAX(timestamp) FROM records) - 7 * 24 * 3600 * 1000"
     if where:
@@ -660,6 +987,310 @@ async def config():
         "model_costs": CONFIG.get("model_costs", {}),
         "eval_thresholds": CONFIG.get("eval_thresholds", {}),
     }
+
+
+@app.get("/api/ratelimits")
+async def ratelimits():
+    """
+    Return rate limit configuration and current usage metrics.
+    Rate limits are per model family (e.g. claude-haiku includes all haiku variants).
+    Usage is aggregated across all models in each family.
+    """
+    rate_cfg = CONFIG.get("rate_limits", {})
+
+    with sqlite3.connect(reader.db_path) as conn:
+        cursor = conn.cursor()
+        now_ms = int(time.time() * 1000)
+        one_min_ago = now_ms - 60_000
+        one_hour_ago = now_ms - 3_600_000
+
+        # Per-model usage in last 1 minute
+        cursor.execute("""
+            SELECT model, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
+                   COALESCE(SUM(tokens_input + tokens_cache_read + tokens_cache_write), 0) as input_tokens,
+                   COALESCE(SUM(tokens_output), 0) as output_tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY model
+        """, (one_min_ago,))
+        raw_1m = {}
+        for row in cursor.fetchall():
+            raw_1m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
+
+        # Per-model usage in last 1 hour
+        cursor.execute("""
+            SELECT model, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
+                   COALESCE(SUM(tokens_input + tokens_cache_read + tokens_cache_write), 0) as input_tokens,
+                   COALESCE(SUM(tokens_output), 0) as output_tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY model
+        """, (one_hour_ago,))
+        raw_1h = {}
+        for row in cursor.fetchall():
+            raw_1h[row[0]] = {"rph": row[1], "tph": row[2]}
+
+        # All known models
+        cursor.execute("SELECT DISTINCT model FROM records ORDER BY model")
+        all_models = [row[0] for row in cursor.fetchall()]
+
+    # Aggregate usage per family
+    families = {}
+    for family_name, family_cfg in rate_cfg.items():
+        if not isinstance(family_cfg, dict):
+            continue
+        member_models = family_cfg.get("models", [])
+        meta_keys = {"models", "auto_detected"}
+        limits = {k: v for k, v in family_cfg.items() if k not in meta_keys}
+
+        # Sum usage across all member models
+        agg_1m = {"rpm": 0, "tpm": 0, "input_tpm": 0, "output_tpm": 0}
+        agg_1h = {"rph": 0, "tph": 0}
+        for mdl in member_models:
+            if mdl in raw_1m:
+                agg_1m["rpm"] += raw_1m[mdl]["rpm"]
+                agg_1m["tpm"] += raw_1m[mdl]["tpm"]
+                agg_1m["input_tpm"] += raw_1m[mdl].get("input_tpm", 0)
+                agg_1m["output_tpm"] += raw_1m[mdl].get("output_tpm", 0)
+            if mdl in raw_1h:
+                agg_1h["rph"] += raw_1h[mdl]["rph"]
+                agg_1h["tph"] += raw_1h[mdl]["tph"]
+
+        families[family_name] = {
+            "limits": limits,
+            "models": member_models,
+            "auto_detected": bool(family_cfg.get("auto_detected")),
+            "usage_1m": agg_1m,
+            "usage_1h": agg_1h,
+        }
+
+    return {
+        "families": families,
+        "all_models": all_models,
+    }
+
+
+@app.post("/api/ratelimits/probe")
+async def ratelimits_probe():
+    """Re-probe provider APIs to auto-detect current rate limits."""
+    await apply_auto_detected_limits()
+    return {"status": "ok", "message": "Rate limits re-probed from provider APIs"}
+
+
+@app.post("/api/ratelimits")
+async def ratelimits_update(
+    family: str = Body(..., description="Family name (e.g. claude-haiku)"),
+    rpm: Optional[int] = Body(None, description="Requests per minute limit"),
+    tpm: Optional[int] = Body(None, description="Tokens per minute limit"),
+    rph: Optional[int] = Body(None, description="Requests per hour limit"),
+    tph: Optional[int] = Body(None, description="Tokens per hour limit"),
+    models: Optional[List[str]] = Body(None, description="Model IDs in this family"),
+):
+    """
+    Set or update rate limits for a model family in config.yaml.
+    Pass null/0 to remove a specific limit.
+    """
+    global CONFIG
+
+    if "rate_limits" not in CONFIG:
+        CONFIG["rate_limits"] = {}
+
+    family_cfg = CONFIG["rate_limits"].setdefault(family, {})
+
+    for key, val in [("rpm", rpm), ("tpm", tpm), ("rph", rph), ("tph", tph)]:
+        if val is not None:
+            if val > 0:
+                family_cfg[key] = val
+            else:
+                family_cfg.pop(key, None)
+
+    if models is not None:
+        family_cfg["models"] = models
+
+    # Mark as manually set so auto-detection won't overwrite
+    family_cfg.pop("auto_detected", None)
+
+    # Clean up empty entries (but keep if it still has models list)
+    if not any(k for k in family_cfg if k not in ("models", "auto_detected")):
+        if not family_cfg.get("models"):
+            CONFIG["rate_limits"].pop(family, None)
+
+    try:
+        with open(config_path, "w") as f:
+            yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        logger.error(f"Failed to write config.yaml: {e}")
+        return {"error": f"Failed to save: {e}", "status": 500}
+
+    logger.info(f"Updated rate limits for family {family}: rpm={rpm}, tpm={tpm}, rph={rph}, tph={tph}")
+    return {"status": "ok", "family": family, "limits": CONFIG["rate_limits"].get(family, {})}
+
+
+# ============================================================================
+# SPEND LIMITS
+# ============================================================================
+
+def _compute_spend_entry(member_models, daily_limit, monthly_limit, reset_date_str, daily_cost_by_model):
+    """Compute spend usage for a set of models with given limits."""
+    now = datetime.utcnow()
+    month_start_ms = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+
+    # Period cost since reset_date or start of month
+    period_start_ms = month_start_ms
+    if reset_date_str:
+        try:
+            reset_dt = datetime.strptime(str(reset_date_str), "%Y-%m-%d")
+            while reset_dt > now:
+                if reset_dt.month == 1:
+                    reset_dt = reset_dt.replace(year=reset_dt.year - 1, month=12)
+                else:
+                    reset_dt = reset_dt.replace(month=reset_dt.month - 1)
+            period_start_ms = int(reset_dt.timestamp() * 1000)
+        except Exception:
+            pass
+
+    period_cost = 0.0
+    if member_models:
+        placeholders = ",".join("?" * len(member_models))
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"""
+                SELECT COALESCE(SUM(cost_total), 0)
+                FROM records WHERE timestamp >= ? AND model IN ({placeholders})
+            """, [period_start_ms] + member_models)
+            period_cost = cursor.fetchone()[0] or 0.0
+
+    daily_cost = sum(daily_cost_by_model.get(m, 0.0) for m in member_models)
+
+    # Next reset date
+    next_reset = None
+    if reset_date_str:
+        try:
+            next_dt = datetime.strptime(str(reset_date_str), "%Y-%m-%d")
+            while next_dt <= now:
+                if next_dt.month == 12:
+                    next_dt = next_dt.replace(year=next_dt.year + 1, month=1)
+                else:
+                    next_dt = next_dt.replace(month=next_dt.month + 1)
+            next_reset = next_dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+
+    return {
+        "daily_limit": daily_limit,
+        "monthly_limit": monthly_limit,
+        "reset_date": reset_date_str,
+        "next_reset": next_reset,
+        "models": member_models,
+        "usage_daily": round(daily_cost, 6),
+        "usage_period": round(period_cost, 6),
+    }
+
+
+@app.get("/api/spendlimits")
+async def spendlimits():
+    """
+    Return spend limit configuration and current usage.
+    Supports both flat provider-level limits and per-project limits.
+    """
+    spend_cfg = CONFIG.get("spend_limits", {})
+
+    # Pre-fetch daily costs per model
+    with sqlite3.connect(reader.db_path) as conn:
+        cursor = conn.cursor()
+        today_start_ms = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        cursor.execute("""
+            SELECT model, COALESCE(SUM(cost_total), 0) as cost
+            FROM records WHERE timestamp >= ?
+            GROUP BY model
+        """, (today_start_ms,))
+        daily_cost_by_model = {row[0]: row[1] for row in cursor.fetchall()}
+
+    providers = {}
+    for provider_name, prov_cfg in spend_cfg.items():
+        if not isinstance(prov_cfg, dict):
+            continue
+
+        if prov_cfg.get("projects"):
+            # Multi-project: emit one entry per project keyed as "provider/project"
+            for proj_name, proj_cfg in prov_cfg["projects"].items():
+                if not isinstance(proj_cfg, dict):
+                    continue
+                key = f"{provider_name}/{proj_name}"
+                entry = _compute_spend_entry(
+                    proj_cfg.get("models", []),
+                    proj_cfg.get("daily"),
+                    proj_cfg.get("monthly"),
+                    proj_cfg.get("reset_date"),
+                    daily_cost_by_model,
+                )
+                entry["provider"] = provider_name
+                entry["project"] = proj_name
+                providers[key] = entry
+        else:
+            # Flat provider-level limit
+            providers[provider_name] = _compute_spend_entry(
+                prov_cfg.get("models", []),
+                prov_cfg.get("daily"),
+                prov_cfg.get("monthly"),
+                prov_cfg.get("reset_date"),
+                daily_cost_by_model,
+            )
+
+    return {"providers": providers}
+
+
+@app.post("/api/spendlimits")
+async def spendlimits_update(
+    provider: str = Body(..., description="Provider name (e.g. anthropic)"),
+    project: Optional[str] = Body(None, description="Project name for multi-project providers"),
+    daily: Optional[float] = Body(None, description="Daily cost cap"),
+    monthly: Optional[float] = Body(None, description="Monthly cost cap"),
+    reset_date: Optional[str] = Body(None, description="Monthly reset date (YYYY-MM-DD)"),
+    models: Optional[List[str]] = Body(None, description="Model IDs covered"),
+):
+    """
+    Set or update spend limits for a provider (or project) in config.yaml.
+    Pass null/0 to remove a specific limit.
+    """
+    global CONFIG
+
+    if "spend_limits" not in CONFIG:
+        CONFIG["spend_limits"] = {}
+
+    # Determine target config node
+    if project:
+        prov_cfg = CONFIG["spend_limits"].setdefault(provider, {})
+        if "projects" not in prov_cfg:
+            prov_cfg["projects"] = {}
+        target = prov_cfg["projects"].setdefault(project, {})
+    else:
+        target = CONFIG["spend_limits"].setdefault(provider, {})
+
+    for key, val in [("daily", daily), ("monthly", monthly)]:
+        if val is not None:
+            if val > 0:
+                target[key] = val
+            else:
+                target.pop(key, None)
+
+    if reset_date is not None:
+        if reset_date:
+            target["reset_date"] = reset_date
+        else:
+            target.pop("reset_date", None)
+
+    if models is not None:
+        target["models"] = models
+
+    try:
+        with open(config_path, "w") as f:
+            yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        logger.error(f"Failed to write config.yaml: {e}")
+        return {"error": f"Failed to save: {e}", "status": 500}
+
+    label = f"{provider}/{project}" if project else provider
+    logger.info(f"Updated spend limits for {label}: daily={daily}, monthly={monthly}, reset_date={reset_date}")
+    return {"status": "ok", "provider": provider, "project": project}
 
 
 @app.post("/api/refresh")

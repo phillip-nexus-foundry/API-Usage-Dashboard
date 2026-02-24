@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>API Usage Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css">
+    <link rel="stylesheet" href="/static/style.css?v=10">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
@@ -47,7 +47,8 @@
         <div class="card balance-tracker-card">
             <div class="balance-tracker-header">
                 <span class="card-title" style="margin-bottom:0">Balance Tracker</span>
-                <div class="balance-sort-controls">
+                <div class="balance-header-right">
+                    <div id="balanceToggles" class="balance-toggles"></div>
                     <select id="balanceSortSelect" class="balance-sort-select">
                         <option value="usage-desc">Most Usage</option>
                         <option value="usage-asc">Least Usage</option>
@@ -60,12 +61,28 @@
         </div>
 
         <!-- Row 1: KPI Cards -->
-        <div class="grid" style="margin-top: 12px;">
+        <div class="kpi-header" style="margin-top: 12px;">
+            <span class="card-title" style="margin-bottom:0">Metrics</span>
+            <div style="display:flex;align-items:center;gap:8px;">
+                <select id="kpiRangeSelect" class="balance-sort-select">
+                    <option value="all">All Time</option>
+                    <option value="today">Today</option>
+                    <option value="week">This Week</option>
+                    <option value="month" selected>This Month</option>
+                    <option value="year">This Year</option>
+                </select>
+                <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text-secondary);cursor:pointer;">
+                    <input type="checkbox" id="kpiRollingToggle" style="cursor:pointer;">
+                    Rolling
+                </label>
+            </div>
+        </div>
+        <div class="grid">
             <div class="grid-item" style="grid-column: span 2;">
-                <div class="card"><div class="card-title">Total Calls</div><div class="card-value" id="kpiCalls">—</div><div class="card-meta" id="kpiCallsMeta"></div></div>
+                <div class="card"><div class="card-title">Calls</div><div class="card-value" id="kpiCalls">—</div><div class="card-meta" id="kpiCallsMeta"></div></div>
             </div>
             <div class="grid-item" style="grid-column: span 2;">
-                <div class="card"><div class="card-title">Total Cost</div><div class="card-value" id="kpiCost">—</div><div class="card-meta" id="kpiCostMeta"></div></div>
+                <div class="card"><div class="card-title">Cost</div><div class="card-value" id="kpiCost">—</div><div class="card-meta" id="kpiCostMeta"></div></div>
             </div>
             <div class="grid-item" style="grid-column: span 2;">
                 <div class="card"><div class="card-title">Error Rate</div><div class="card-value" id="kpiErrorRate">—</div><div class="card-meta" id="kpiErrorRateMeta"></div></div>
@@ -87,6 +104,8 @@
                         <button class="btn ts-nav-btn" id="tsPrevTokens">&lt;</button>
                         <span class="ts-range-label" id="tsRangeLabelTokens"></span>
                         <button class="btn ts-nav-btn" id="tsNextTokens">&gt;</button>
+                        <button class="btn ts-nav-btn ts-zoom" id="tsZoomOutTokens" title="Wider range">-</button>
+                        <button class="btn ts-nav-btn ts-zoom" id="tsZoomInTokens" title="Narrower range">+</button>
                     </div>
                     <div class="chart-container"><canvas id="tokenTimeSeriesChart"></canvas></div>
                 </div>
@@ -98,6 +117,8 @@
                         <button class="btn ts-nav-btn" id="tsPrevCost">&lt;</button>
                         <span class="ts-range-label" id="tsRangeLabelCost"></span>
                         <button class="btn ts-nav-btn" id="tsNextCost">&gt;</button>
+                        <button class="btn ts-nav-btn ts-zoom" id="tsZoomOutCost" title="Wider range">-</button>
+                        <button class="btn ts-nav-btn ts-zoom" id="tsZoomInCost" title="Narrower range">+</button>
                     </div>
                     <div class="chart-container"><canvas id="costTimeSeriesChart"></canvas></div>
                 </div>
@@ -136,7 +157,44 @@
             </div>
         </div>
 
-        <!-- Row 5: Call Log Table -->
+        <!-- Row 5: Rate Limits -->
+        <div class="card rate-limit-card">
+            <div class="rate-limit-header">
+                <span class="card-title" style="margin-bottom:0">Rate Limits</span>
+                <button class="btn" id="probeRateLimitsBtn" style="font-size:11px;padding:3px 10px;" title="Re-probe provider APIs for current rate limits">Re-probe APIs</button>
+                <button class="btn" id="addRateLimitBtn" style="font-size:11px;padding:3px 10px;">+ Add Custom Limit</button>
+            </div>
+            <div id="rateLimitContainer" class="rate-limit-grid"></div>
+            <div id="rateLimitForm" class="rate-limit-form" style="display:none;">
+                <select id="rlModelSelect" class="topup-input" style="flex:2;min-width:120px;" title="Model family"></select>
+                <input type="number" id="rlRpm" class="topup-input" placeholder="RPM" style="width:70px;" min="0">
+                <input type="number" id="rlTpm" class="topup-input" placeholder="TPM" style="width:90px;" min="0">
+                <input type="number" id="rlRph" class="topup-input" placeholder="RPH" style="width:70px;" min="0">
+                <input type="number" id="rlTph" class="topup-input" placeholder="TPH" style="width:90px;" min="0">
+                <button class="btn primary" id="rlSaveBtn" style="font-size:11px;padding:3px 10px;">Save</button>
+                <button class="btn" id="rlCancelBtn" style="font-size:11px;padding:3px 10px;">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Row 5b: Spend Limits -->
+        <div class="card rate-limit-card">
+            <div class="rate-limit-header">
+                <span class="card-title" style="margin-bottom:0">Spend Limits</span>
+                <button class="btn" id="addSpendLimitBtn" style="font-size:11px;padding:3px 10px;">+ Add Spend Limit</button>
+            </div>
+            <div id="spendLimitContainer" class="rate-limit-grid"></div>
+            <div id="spendLimitForm" class="rate-limit-form" style="display:none;">
+                <input type="text" id="slProvider" class="topup-input" placeholder="Provider name" style="flex:2;min-width:120px;">
+                <input type="text" id="slProject" class="topup-input" placeholder="Project (optional)" style="width:120px;">
+                <input type="number" id="slDaily" class="topup-input" placeholder="Daily $" style="width:80px;" min="0" step="0.01">
+                <input type="number" id="slMonthly" class="topup-input" placeholder="Monthly $" style="width:90px;" min="0" step="0.01">
+                <input type="date" id="slResetDate" class="topup-input" placeholder="Reset date" style="width:120px;" title="Monthly reset date">
+                <button class="btn primary" id="slSaveBtn" style="font-size:11px;padding:3px 10px;">Save</button>
+                <button class="btn" id="slCancelBtn" style="font-size:11px;padding:3px 10px;">Cancel</button>
+            </div>
+        </div>
+
+        <!-- Row 6: Call Log Table -->
         <div class="grid">
             <div class="grid-item" style="grid-column: span 12;">
                 <div class="card">
@@ -188,6 +246,6 @@
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
-    <script src="/static/dashboard.js"></script>
+    <script src="/static/dashboard.js?v=10"></script>
 </body>
 </html>

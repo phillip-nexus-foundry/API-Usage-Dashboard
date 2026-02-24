@@ -1,0 +1,2 @@
+Even though we have automatic tracking of rate limit usage for Anthropic models, 
+I've been using Haiku today this morning and it did not update the limit usage.

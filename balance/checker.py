@@ -37,7 +37,11 @@ class BalanceChecker:
     async def _check_provider(
         self, name: str, cfg: Dict[str, Any], reader
     ) -> Dict[str, Any]:
-        """Route to API check or ledger check based on config."""
+        """Route to API check, ledger check, or multi-project check based on config."""
+        # Multi-project provider (e.g. moonshot with multiple API keys/projects)
+        if cfg.get("projects"):
+            return self._check_provider_with_projects(name, cfg, reader)
+
         # If provider has an api_key_env, try API first
         if cfg.get("api_key_env"):
             api_result = await self._check_api(name, cfg)
@@ -59,6 +63,78 @@ class BalanceChecker:
             "status": "not_configured",
             "message": f"No ledger or api_key_env configured for {name}",
         }
+
+    def _check_provider_with_projects(
+        self, name: str, cfg: Dict[str, Any], reader
+    ) -> Dict[str, Any]:
+        """Check balance for a provider with multiple projects.
+        Each project has its own ledger and model list for cost attribution.
+        Returns aggregate totals + per-project breakdowns."""
+        try:
+            warn_threshold = cfg.get("warn_threshold", 20.0)
+            critical_threshold = cfg.get("critical_threshold", 5.0)
+
+            projects_result = {}
+            total_deposits = 0.0
+            total_cost = 0.0
+
+            for proj_name, proj_cfg in cfg["projects"].items():
+                if not isinstance(proj_cfg, dict):
+                    continue
+
+                ledger = proj_cfg.get("ledger", [])
+                proj_deposits = sum(entry.get("amount", 0) for entry in ledger)
+                proj_models = proj_cfg.get("models", [])
+                proj_cost = self._get_models_cost(reader, proj_models) if proj_models else 0.0
+                proj_remaining = proj_deposits - proj_cost
+
+                proj_status = "ok"
+                if proj_remaining <= critical_threshold:
+                    proj_status = "critical"
+                elif proj_remaining <= warn_threshold:
+                    proj_status = "warn"
+
+                personal = sum(
+                    e.get("amount", 0) for e in ledger if not e.get("is_voucher")
+                )
+
+                projects_result[proj_name] = {
+                    "status": proj_status,
+                    "total_deposits": round(proj_deposits, 2),
+                    "cumulative_cost": round(proj_cost, 6),
+                    "remaining": round(proj_remaining, 2),
+                    "personal_invested": round(personal, 2),
+                    "models": proj_models,
+                    "ledger": ledger,
+                }
+
+                total_deposits += proj_deposits
+                total_cost += proj_cost
+
+            remaining = total_deposits - total_cost
+
+            # Provider status = worst across all projects
+            worst = "ok"
+            for proj in projects_result.values():
+                if proj["status"] == "critical":
+                    worst = "critical"
+                    break
+                if proj["status"] == "warn":
+                    worst = "warn"
+
+            return {
+                "status": worst,
+                "total_deposits": round(total_deposits, 2),
+                "cumulative_cost": round(total_cost, 6),
+                "remaining": round(remaining, 2),
+                "warn_threshold": warn_threshold,
+                "critical_threshold": critical_threshold,
+                "projects": projects_result,
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to check {name} multi-project balance: {e}")
+            return {"status": "error", "message": str(e)}
 
     def _check_ledger(
         self, provider_name: str, cfg: Dict[str, Any], reader
@@ -108,6 +184,19 @@ class BalanceChecker:
             cursor.execute(
                 "SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE provider = ?",
                 (provider_name,),
+            )
+            return cursor.fetchone()[0]
+
+    def _get_models_cost(self, reader, models: list) -> float:
+        """Get total cost for specific models from the database."""
+        if not models:
+            return 0.0
+        placeholders = ",".join("?" * len(models))
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE model IN ({placeholders})",
+                models,
             )
             return cursor.fetchone()[0]
 
