@@ -151,7 +151,7 @@ reader = OpenClawReader(
     db_path="dashboard.db",
     sessions_dir=CONFIG["sessions_dir"]
 )
-balance_checker = BalanceChecker(CONFIG)
+balance_checker = BalanceChecker(CONFIG, config_path=str(config_path))
 evaluator = Evaluator(CONFIG)
 
 # Create FastAPI app
@@ -1002,6 +1002,7 @@ async def ratelimits():
         cursor = conn.cursor()
         now_ms = int(time.time() * 1000)
         one_min_ago = now_ms - 60_000
+        five_min_ago = now_ms - 300_000
         one_hour_ago = now_ms - 3_600_000
 
         # Per-model usage in last 1 minute
@@ -1016,6 +1017,18 @@ async def ratelimits():
         for row in cursor.fetchall():
             raw_1m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
 
+        # Per-model usage in last 5 minutes (for peak-minute calculation)
+        cursor.execute("""
+            SELECT model, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
+                   COALESCE(SUM(tokens_input + tokens_cache_read + tokens_cache_write), 0) as input_tokens,
+                   COALESCE(SUM(tokens_output), 0) as output_tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY model
+        """, (five_min_ago,))
+        raw_5m = {}
+        for row in cursor.fetchall():
+            raw_5m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
+
         # Per-model usage in last 1 hour
         cursor.execute("""
             SELECT model, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
@@ -1027,6 +1040,17 @@ async def ratelimits():
         raw_1h = {}
         for row in cursor.fetchall():
             raw_1h[row[0]] = {"rph": row[1], "tph": row[2]}
+
+        # Recent rate limit errors (last 1 hour) — stop_reason='error' with 0 tokens
+        cursor.execute("""
+            SELECT model, MAX(timestamp) as last_error, COUNT(*) as error_count
+            FROM records
+            WHERE timestamp >= ? AND stop_reason = 'error' AND tokens_total = 0
+            GROUP BY model
+        """, (one_hour_ago,))
+        rate_limit_errors = {}
+        for row in cursor.fetchall():
+            rate_limit_errors[row[0]] = {"last_error": row[1], "error_count": row[2]}
 
         # All known models
         cursor.execute("SELECT DISTINCT model FROM records ORDER BY model")
@@ -1043,23 +1067,36 @@ async def ratelimits():
 
         # Sum usage across all member models
         agg_1m = {"rpm": 0, "tpm": 0, "input_tpm": 0, "output_tpm": 0}
+        agg_5m = {"rpm": 0, "tpm": 0, "input_tpm": 0, "output_tpm": 0}
         agg_1h = {"rph": 0, "tph": 0}
+        agg_errors = {"last_error": 0, "error_count": 0}
         for mdl in member_models:
             if mdl in raw_1m:
                 agg_1m["rpm"] += raw_1m[mdl]["rpm"]
                 agg_1m["tpm"] += raw_1m[mdl]["tpm"]
                 agg_1m["input_tpm"] += raw_1m[mdl].get("input_tpm", 0)
                 agg_1m["output_tpm"] += raw_1m[mdl].get("output_tpm", 0)
+            if mdl in raw_5m:
+                agg_5m["rpm"] += raw_5m[mdl]["rpm"]
+                agg_5m["tpm"] += raw_5m[mdl]["tpm"]
+                agg_5m["input_tpm"] += raw_5m[mdl].get("input_tpm", 0)
+                agg_5m["output_tpm"] += raw_5m[mdl].get("output_tpm", 0)
             if mdl in raw_1h:
                 agg_1h["rph"] += raw_1h[mdl]["rph"]
                 agg_1h["tph"] += raw_1h[mdl]["tph"]
+            if mdl in rate_limit_errors:
+                err = rate_limit_errors[mdl]
+                agg_errors["error_count"] += err["error_count"]
+                agg_errors["last_error"] = max(agg_errors["last_error"], err["last_error"])
 
         families[family_name] = {
             "limits": limits,
             "models": member_models,
             "auto_detected": bool(family_cfg.get("auto_detected")),
             "usage_1m": agg_1m,
+            "usage_5m": agg_5m,
             "usage_1h": agg_1h,
+            "rate_limit_errors": agg_errors if agg_errors["error_count"] > 0 else None,
         }
 
     return {

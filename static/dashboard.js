@@ -1110,7 +1110,9 @@ function renderRateLimits() {
         const fam = families[family];
         const lim = fam.limits || {};
         const u1m = fam.usage_1m || { rpm: 0, tpm: 0 };
+        const u5m = fam.usage_5m || { rpm: 0, tpm: 0 };
         const u1h = fam.usage_1h || { rph: 0, tph: 0 };
+        const errors = fam.rate_limit_errors;
         const memberModels = fam.models || [];
 
         const card = document.createElement('div');
@@ -1123,51 +1125,81 @@ function renderRateLimits() {
             ? '<span class="rl-auto-badge">auto-detected</span>'
             : '';
 
-        let html = `<div class="rl-model-name">${family} ${autoTag}</div>${modelsSubtitle}<div class="rl-meters">`;
+        // Rate limit error alert
+        let errorBanner = '';
+        if (errors && errors.error_count > 0) {
+            const ago = Math.round((Date.now() - errors.last_error) / 1000);
+            let agoStr;
+            if (ago < 60) agoStr = `${ago}s ago`;
+            else if (ago < 3600) agoStr = `${Math.round(ago/60)}m ago`;
+            else agoStr = `${Math.round(ago/3600)}h ago`;
+            errorBanner = `<div style="background:rgba(248,81,73,0.15);border:1px solid rgba(248,81,73,0.4);border-radius:4px;padding:4px 8px;margin-bottom:6px;font-size:11px;color:#f85149;">
+                ⚠ Rate limited ${errors.error_count}× in last hour (last: ${agoStr})
+            </div>`;
+        }
+
+        let html = `<div class="rl-model-name">${family} ${autoTag}</div>${modelsSubtitle}${errorBanner}<div class="rl-meters">`;
+
+        // For per-minute meters: show the HIGHER of current 1m vs average-per-minute over 5m
+        // This prevents bars from showing 0 immediately after a burst
+        function effectivePerMin(current1m, total5m) {
+            const avg5m = total5m / 5;
+            return Math.max(current1m, avg5m);
+        }
 
         // RPM meter
         if (lim.rpm) {
-            const pct = Math.min(100, (u1m.rpm / lim.rpm) * 100);
-            const cls = pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const effective = effectivePerMin(u1m.rpm, u5m.rpm);
+            const pct = Math.min(100, (effective / lim.rpm) * 100);
+            const cls = errors ? 'rl-critical' : pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const label = u1m.rpm !== Math.round(effective) ? `RPM <span style="font-size:9px;opacity:0.6">(5m avg)</span>` : 'RPM';
             html += `<div class="rl-meter">
-                <div class="rl-meter-label">RPM</div>
+                <div class="rl-meter-label">${label}</div>
                 <div class="rl-meter-bar"><div class="rl-meter-fill ${cls}" style="width:${pct}%"></div></div>
-                <div class="rl-meter-value">${u1m.rpm} / ${lim.rpm}</div>
+                <div class="rl-meter-value">${Math.round(effective)} / ${lim.rpm}</div>
             </div>`;
         }
 
         // TPM meter
         if (lim.tpm) {
-            const pct = Math.min(100, (u1m.tpm / lim.tpm) * 100);
-            const cls = pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const effective = effectivePerMin(u1m.tpm, u5m.tpm);
+            const pct = Math.min(100, (effective / lim.tpm) * 100);
+            const cls = errors ? 'rl-critical' : pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const label = u1m.tpm !== Math.round(effective) ? `TPM <span style="font-size:9px;opacity:0.6">(5m avg)</span>` : 'TPM';
             html += `<div class="rl-meter">
-                <div class="rl-meter-label">TPM</div>
+                <div class="rl-meter-label">${label}</div>
                 <div class="rl-meter-bar"><div class="rl-meter-fill ${cls}" style="width:${pct}%"></div></div>
-                <div class="rl-meter-value">${u1m.tpm.toLocaleString()} / ${lim.tpm.toLocaleString()}</div>
+                <div class="rl-meter-value">${Math.round(effective).toLocaleString()} / ${lim.tpm.toLocaleString()}</div>
             </div>`;
         }
 
         // Input TPM meter
         if (lim.input_tpm) {
-            const inputUsage = u1m.input_tpm || 0;
-            const pct = Math.min(100, (inputUsage / lim.input_tpm) * 100);
-            const cls = pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const current = u1m.input_tpm || 0;
+            const total5 = u5m.input_tpm || 0;
+            const effective = effectivePerMin(current, total5);
+            const pct = Math.min(100, (effective / lim.input_tpm) * 100);
+            const cls = errors ? 'rl-critical' : pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const label = current !== Math.round(effective) ? `IN TPM <span style="font-size:9px;opacity:0.6">(5m avg)</span>` : 'IN TPM';
             html += `<div class="rl-meter">
-                <div class="rl-meter-label rl-sub">IN TPM</div>
+                <div class="rl-meter-label rl-sub">${label}</div>
                 <div class="rl-meter-bar"><div class="rl-meter-fill ${cls}" style="width:${pct}%"></div></div>
-                <div class="rl-meter-value">${inputUsage.toLocaleString()} / ${lim.input_tpm.toLocaleString()}</div>
+                <div class="rl-meter-value">${Math.round(effective).toLocaleString()} / ${lim.input_tpm.toLocaleString()}</div>
             </div>`;
         }
 
         // Output TPM meter
         if (lim.output_tpm) {
-            const outputUsage = u1m.output_tpm || 0;
-            const pct = Math.min(100, (outputUsage / lim.output_tpm) * 100);
-            const cls = pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const current = u1m.output_tpm || 0;
+            const total5 = u5m.output_tpm || 0;
+            const effective = effectivePerMin(current, total5);
+            const pct = Math.min(100, (effective / lim.output_tpm) * 100);
+            const cls = errors ? 'rl-critical' : pct >= 90 ? 'rl-critical' : pct >= 70 ? 'rl-warn' : 'rl-ok';
+            const label = current !== Math.round(effective) ? `OUT TPM <span style="font-size:9px;opacity:0.6">(5m avg)</span>` : 'OUT TPM';
             html += `<div class="rl-meter">
-                <div class="rl-meter-label rl-sub">OUT TPM</div>
+                <div class="rl-meter-label rl-sub">${label}</div>
                 <div class="rl-meter-bar"><div class="rl-meter-fill ${cls}" style="width:${pct}%"></div></div>
-                <div class="rl-meter-value">${outputUsage.toLocaleString()} / ${lim.output_tpm.toLocaleString()}</div>
+                <div class="rl-meter-value">${Math.round(effective).toLocaleString()} / ${lim.output_tpm.toLocaleString()}</div>
             </div>`;
         }
 

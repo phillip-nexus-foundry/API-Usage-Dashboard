@@ -7,18 +7,40 @@ Supports two modes per provider:
 import os
 import json
 import httpx
+import yaml
 import sqlite3
 import logging
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Path to store last known API balances for auto top-up detection
+_LAST_BALANCE_FILE = os.path.join(os.path.dirname(__file__), ".last_api_balances.json")
+
+
+def _load_last_balances() -> Dict[str, float]:
+    try:
+        with open(_LAST_BALANCE_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _save_last_balances(data: Dict[str, float]):
+    try:
+        with open(_LAST_BALANCE_FILE, "w") as f:
+            json.dump(data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save last balances: {e}")
 
 
 class BalanceChecker:
     """Checks remaining balance for each configured provider."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], config_path: str = None):
         self.config = config
+        self.config_path = config_path
 
     async def check_balances(self, reader) -> Dict[str, Any]:
         """Check balances for all providers configured under balance: in config."""
@@ -40,7 +62,29 @@ class BalanceChecker:
         """Route to API check, ledger check, or multi-project check based on config."""
         # Multi-project provider (e.g. moonshot with multiple API keys/projects)
         if cfg.get("projects"):
-            return self._check_provider_with_projects(name, cfg, reader)
+            result = self._check_provider_with_projects(name, cfg, reader)
+            # If provider also has an API key, use live API balance instead of ledger math
+            if cfg.get("api_key_env"):
+                api_result = await self._check_api(name, cfg)
+                if api_result.get("remaining") is not None:
+                    api_balance = api_result["remaining"]
+                    result["remaining"] = api_balance
+                    result["balance_source"] = "api"
+                    # Recalculate status based on live balance
+                    warn = cfg.get("warn_threshold", 10.0)
+                    crit = cfg.get("critical_threshold", 2.0)
+                    if api_balance <= crit:
+                        result["status"] = "critical"
+                    elif api_balance <= warn:
+                        result["status"] = "warn"
+                    else:
+                        result["status"] = "ok"
+                    # Auto-detect top-ups: if API balance went up, add ledger entry
+                    self._detect_topup(name, api_balance, cfg)
+                else:
+                    result["balance_source"] = "ledger"
+                    result["api_note"] = api_result.get("message", "API unavailable")
+            return result
 
         # If provider has an api_key_env, try API first
         if cfg.get("api_key_env"):
@@ -135,6 +179,54 @@ class BalanceChecker:
         except Exception as e:
             logger.error(f"Failed to check {name} multi-project balance: {e}")
             return {"status": "error", "message": str(e)}
+
+    def _detect_topup(self, provider_name: str, current_balance: float, cfg: Dict[str, Any]):
+        """Detect if API balance increased (top-up) and auto-add a ledger entry."""
+        last_balances = _load_last_balances()
+        last_balance = last_balances.get(provider_name)
+
+        # Save current balance for next comparison
+        last_balances[provider_name] = current_balance
+        _save_last_balances(last_balances)
+
+        if last_balance is None:
+            # First time seeing this provider — no comparison possible
+            return
+
+        increase = current_balance - last_balance
+        if increase <= 0.01:
+            # Balance didn't go up (or negligible rounding)
+            return
+
+        # Balance went up — auto-add ledger entry
+        amount = round(increase, 2)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        entry = {
+            "date": today,
+            "amount": amount,
+            "note": "Auto-detected top-up",
+        }
+
+        # Find the first project's ledger to add to
+        if cfg.get("projects"):
+            for proj_name, proj_cfg in cfg["projects"].items():
+                if isinstance(proj_cfg, dict):
+                    if "ledger" not in proj_cfg:
+                        proj_cfg["ledger"] = []
+                    proj_cfg["ledger"].append(entry)
+                    logger.info(f"Auto-detected top-up for {provider_name}/{proj_name}: +${amount:.2f}")
+                    break
+        elif "ledger" in cfg:
+            cfg["ledger"].append(entry)
+            logger.info(f"Auto-detected top-up for {provider_name}: +${amount:.2f}")
+
+        # Persist to config.yaml
+        if self.config_path:
+            try:
+                with open(self.config_path, "w") as f:
+                    yaml.dump(self.config, f, default_flow_style=False, sort_keys=False)
+            except Exception as e:
+                logger.error(f"Failed to save auto-detected top-up to config.yaml: {e}")
 
     def _check_ledger(
         self, provider_name: str, cfg: Dict[str, Any], reader
