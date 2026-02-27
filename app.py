@@ -8,7 +8,8 @@ import time
 import yaml
 import logging
 import threading
-from datetime import datetime, timedelta
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dataclasses import asdict
@@ -16,6 +17,7 @@ from dataclasses import asdict
 from fastapi import FastAPI, Query, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from fastapi.responses import JSONResponse
 import aiosqlite
 import sqlite3
 
@@ -154,8 +156,67 @@ reader = OpenClawReader(
 balance_checker = BalanceChecker(CONFIG, config_path=str(config_path))
 evaluator = Evaluator(CONFIG)
 
+def _utc_now() -> datetime:
+    """Timezone-aware UTC datetime."""
+    return datetime.now(timezone.utc)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Application lifecycle: startup scan + watcher, clean shutdown."""
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+
+    logger.info("Scanning session files...")
+    reader.scan()
+    if reader.parse_errors:
+        logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
+
+    # File watcher: auto-scan when session files change
+    class SessionFileHandler(FileSystemEventHandler):
+        def __init__(self):
+            self._timer = None
+
+        def _debounced_scan(self):
+            """Debounce: wait 1s after last change before scanning."""
+            if self._timer:
+                self._timer.cancel()
+            self._timer = threading.Timer(1.0, self._do_scan)
+            self._timer.start()
+
+        def _do_scan(self):
+            logger.info("File change detected, rescanning...")
+            reader.scan()
+
+        def on_modified(self, event):
+            if event.src_path.endswith(".jsonl"):
+                self._debounced_scan()
+
+        def on_created(self, event):
+            if event.src_path.endswith(".jsonl"):
+                self._debounced_scan()
+
+    observer = Observer()
+    observer.schedule(SessionFileHandler(), CONFIG["sessions_dir"], recursive=False)
+    observer.daemon = True
+    observer.start()
+    logger.info(f"Watching {CONFIG['sessions_dir']} for changes")
+
+    # Auto-detect rate limits from provider APIs
+    logger.info("Probing APIs for rate limits...")
+    await apply_auto_detected_limits()
+
+    logger.info("Startup complete")
+    try:
+        yield
+    finally:
+        logger.info("Stopping file watcher...")
+        observer.stop()
+        observer.join(timeout=3)
+
+
 # Create FastAPI app
-app = FastAPI(title="API Usage Dashboard")
+app = FastAPI(title="API Usage Dashboard", lifespan=lifespan)
 
 # Mount static files
 static_dir = Path(__file__).parent / "static"
@@ -177,52 +238,32 @@ def _build_filter(provider: Optional[str] = None, model: Optional[str] = None):
     return where, params
 
 
-# ============================================================================
-# INITIALIZATION
-# ============================================================================
+def _reload_config_from_disk():
+    """Reload config.yaml and propagate it to components."""
+    global CONFIG
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            CONFIG = yaml.safe_load(f) or {}
+        balance_checker.config = CONFIG
+        evaluator.config = CONFIG
+    except Exception as e:
+        logger.warning(f"Failed to reload config.yaml: {e}")
 
-@app.on_event("startup")
-async def startup():
-    """Parse session files and start file watcher."""
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler
 
-    logger.info("Scanning session files...")
-    reader.scan()
-    if reader.parse_errors:
-        logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
+def _configured_providers() -> List[str]:
+    """Provider names configured under balance."""
+    balance_cfg = CONFIG.get("balance", {})
+    if not isinstance(balance_cfg, dict):
+        return []
+    return sorted([name for name, cfg in balance_cfg.items() if isinstance(cfg, dict)])
 
-    # File watcher: auto-scan when session files change
-    class SessionFileHandler(FileSystemEventHandler):
-        def __init__(self):
-            self._timer = None
-        def _debounced_scan(self):
-            """Debounce: wait 1s after last change before scanning."""
-            if self._timer:
-                self._timer.cancel()
-            self._timer = threading.Timer(1.0, self._do_scan)
-            self._timer.start()
-        def _do_scan(self):
-            logger.info("File change detected, rescanning...")
-            reader.scan()
-        def on_modified(self, event):
-            if event.src_path.endswith('.jsonl'):
-                self._debounced_scan()
-        def on_created(self, event):
-            if event.src_path.endswith('.jsonl'):
-                self._debounced_scan()
 
-    observer = Observer()
-    observer.schedule(SessionFileHandler(), CONFIG["sessions_dir"], recursive=False)
-    observer.daemon = True
-    observer.start()
-    logger.info(f"Watching {CONFIG['sessions_dir']} for changes")
-
-    # Auto-detect rate limits from provider APIs
-    logger.info("Probing APIs for rate limits...")
-    await apply_auto_detected_limits()
-
-    logger.info("Startup complete")
+def _configured_models() -> List[str]:
+    """Model IDs configured under model_costs."""
+    model_costs = CONFIG.get("model_costs", {})
+    if not isinstance(model_costs, dict):
+        return []
+    return sorted(model_costs.keys())
 
 
 # ============================================================================
@@ -247,6 +288,7 @@ async def summary(
     Aggregate KPIs: total calls, cost, tokens, error rate, by-provider, by-model.
     Supports optional provider/model filters and time range.
     """
+    _reload_config_from_disk()
     where, params = _build_filter(provider, model)
     if start:
         where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
@@ -277,10 +319,19 @@ async def summary(
             GROUP BY provider
             ORDER BY calls DESC
         """, params)
-        by_provider = [
+        by_provider_rows = [
             {"provider": r[0], "calls": r[1], "cost": round(r[2] or 0, 6), "tokens": r[3] or 0}
             for r in cursor.fetchall()
         ]
+        provider_map = {entry["provider"]: entry for entry in by_provider_rows}
+        configured_providers = _configured_providers()
+        if provider:
+            if provider in configured_providers and provider not in provider_map:
+                provider_map[provider] = {"provider": provider, "calls": 0, "cost": 0.0, "tokens": 0}
+        else:
+            for prov in configured_providers:
+                provider_map.setdefault(prov, {"provider": prov, "calls": 0, "cost": 0.0, "tokens": 0})
+        by_provider = sorted(provider_map.values(), key=lambda x: (-x["calls"], x["provider"]))
 
         # By model (filtered)
         cursor.execute(f"""
@@ -289,13 +340,22 @@ async def summary(
             GROUP BY model
             ORDER BY calls DESC
         """, params)
-        by_model = [
+        by_model_rows = [
             {"model": r[0], "calls": r[1], "cost": round(r[2] or 0, 6), "tokens": r[3] or 0}
             for r in cursor.fetchall()
         ]
+        model_map = {entry["model"]: entry for entry in by_model_rows}
+        configured_models = _configured_models()
+        if model:
+            if model in configured_models and model not in model_map:
+                model_map[model] = {"model": model, "calls": 0, "cost": 0.0, "tokens": 0}
+        else:
+            for mdl in configured_models:
+                model_map.setdefault(mdl, {"model": mdl, "calls": 0, "cost": 0.0, "tokens": 0})
+        by_model = sorted(model_map.values(), key=lambda x: (-x["calls"], x["model"]))
 
     return {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": _utc_now().isoformat().replace("+00:00", "Z"),
         "total_calls": total_calls,
         "total_cost": round(total_cost, 6),
         "total_tokens": total_tokens,
@@ -307,6 +367,8 @@ async def summary(
         "latest_timestamp": latest_ts,
         "by_provider": by_provider,
         "by_model": by_model,
+        "configured_providers": _configured_providers(),
+        "configured_models": _configured_models(),
     }
 
 
@@ -323,6 +385,7 @@ async def timeseries(
     Interval: minute, hour, day, week, month. Supports provider/model filters and time range.
     Returns per-provider cost breakdown for stacked charts.
     """
+    _reload_config_from_disk()
     bucket_size = {
         "minute": 60,
         "hour": 3600,
@@ -358,7 +421,7 @@ async def timeseries(
         """, params)
 
         data = []
-        for row in cursor.fetchall():
+        for row in cursor:
             data.append({
                 "timestamp": int(row[0]),
                 "calls": row[1],
@@ -379,7 +442,7 @@ async def timeseries(
         """, params)
 
         provider_costs = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             bucket_ts = int(row[0])
             prov = row[1]
             cost = round(row[2] or 0, 6)
@@ -400,7 +463,7 @@ async def timeseries(
         """, params)
 
         provider_tokens = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             bucket_ts = int(row[0])
             prov = row[1]
             tokens = row[2] or 0
@@ -409,11 +472,22 @@ async def timeseries(
                 provider_tokens[prov] = {}
             provider_tokens[prov][bucket_ts] = {"tokens": tokens, "cost": cost}
 
+    configured_providers = _configured_providers()
+    if provider:
+        if provider in configured_providers:
+            provider_costs.setdefault(provider, {})
+            provider_tokens.setdefault(provider, {})
+    else:
+        for prov in configured_providers:
+            provider_costs.setdefault(prov, {})
+            provider_tokens.setdefault(prov, {})
+
     return {
         "interval": interval,
         "data": data,
         "provider_costs": provider_costs,
         "provider_tokens": provider_tokens,
+        "configured_providers": configured_providers,
     }
 
 
@@ -481,7 +555,7 @@ async def calls(
         """, params + [per_page, offset])
         
         calls_list = []
-        for row in cursor.fetchall():
+        for row in cursor:
             call = {
                 "call_id": row["call_id"],
                 "session_id": row["session_id"],
@@ -538,7 +612,7 @@ async def sessions_list():
         """)
         
         sessions = []
-        for row in cursor.fetchall():
+        for row in cursor:
             sessions.append({
                 "session_id": row[0],
                 "calls": row[1],
@@ -593,6 +667,7 @@ async def models(
     """
     Per-model breakdown: calls, tokens, cost, error rate. Supports provider/model/time filters.
     """
+    _reload_config_from_disk()
     where, params = _build_filter(provider, model)
     if start:
         where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
@@ -617,20 +692,43 @@ async def models(
             ORDER BY calls DESC
         """, params)
         
-        models_list = []
-        for row in cursor.fetchall():
+        model_stats = {}
+        for row in cursor:
             calls = row[1]
             error_rate = row[4] / calls if calls > 0 else 0
-            models_list.append({
+            model_stats[row[0]] = {
                 "model": row[0],
                 "calls": calls,
                 "cost": round(row[2] or 0, 6),
                 "tokens": row[3] or 0,
                 "error_rate": round(error_rate, 4),
                 "avg_cache_hit_ratio": round(row[5] or 0, 4),
+            }
+
+    configured_models = _configured_models()
+    if model:
+        if model in configured_models and model not in model_stats:
+            model_stats[model] = {
+                "model": model,
+                "calls": 0,
+                "cost": 0.0,
+                "tokens": 0,
+                "error_rate": 0.0,
+                "avg_cache_hit_ratio": 0.0,
+            }
+    else:
+        for mdl in configured_models:
+            model_stats.setdefault(mdl, {
+                "model": mdl,
+                "calls": 0,
+                "cost": 0.0,
+                "tokens": 0,
+                "error_rate": 0.0,
+                "avg_cache_hit_ratio": 0.0,
             })
-    
-    return {"models": models_list}
+
+    models_list = sorted(model_stats.values(), key=lambda x: (-x["calls"], x["model"]))
+    return {"models": models_list, "configured_models": configured_models}
 
 
 @app.get("/api/tools")
@@ -659,7 +757,7 @@ async def tools(
         cursor.execute(f"SELECT tool_names FROM records{where}{extra}", params)
         
         tool_counts = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             try:
                 tools_list = json.loads(row[0])
                 for tool in tools_list:
@@ -683,6 +781,7 @@ async def balance():
     Includes ledger, usage stats, and spending totals per provider.
     Also includes providers from DB that may not have balance config.
     """
+    _reload_config_from_disk()
     balances = await balance_checker.check_balances(reader)
 
     # Attach ledger history for any provider that has one
@@ -711,7 +810,7 @@ async def balance():
                         if not e.get("is_voucher")
                     )
             balances[provider_name]["personal_invested"] = round(total_personal, 2)
-        elif provider_cfg.get("ledger"):
+        elif "ledger" in provider_cfg:
             balances.setdefault(provider_name, {})["ledger"] = provider_cfg["ledger"]
             personal = sum(
                 e.get("amount", 0) for e in provider_cfg["ledger"]
@@ -727,11 +826,15 @@ async def balance():
                    COALESCE(SUM(tokens_total), 0) as tokens
             FROM records GROUP BY provider ORDER BY calls DESC
         """)
-        for row in cursor.fetchall():
+        for row in cursor:
             prov = row[0]
             balances.setdefault(prov, {})
             balances[prov]["usage_calls"] = row[1]
-            balances[prov]["usage_cost"] = round(row[2], 6)
+            # If checker applied reconciliation override, keep that as canonical usage cost.
+            if "cumulative_cost" in balances.get(prov, {}):
+                balances[prov]["usage_cost"] = round(balances[prov]["cumulative_cost"], 6)
+            else:
+                balances[prov]["usage_cost"] = round(row[2], 6)
             balances[prov]["usage_tokens"] = row[3]
 
         # For multi-project providers, also add per-project usage stats
@@ -798,7 +901,7 @@ async def balance_topup(
 
     # Create new ledger entry
     entry = {
-        "date": datetime.utcnow().strftime("%Y-%m-%d"),
+        "date": _utc_now().strftime("%Y-%m-%d"),
         "amount": round(amount, 2),
     }
     if note:
@@ -886,12 +989,15 @@ async def evals():
 async def cost_daily(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    days: int = Query(90, ge=1, le=3650, description="Rolling day window if start/end are omitted"),
+    row_limit: int = Query(5000, ge=100, le=50000, description="Max grouped rows returned"),
     start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
     end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
     Daily cost breakdown by provider/model. Supports provider/model/time filters.
     """
+    _reload_config_from_disk()
     where, params = _build_filter(provider, model)
     if start:
         where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
@@ -899,6 +1005,10 @@ async def cost_daily(
     if end:
         where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
         params.append(end)
+    if start is None and end is None:
+        rolling_start_ms = int((_utc_now() - timedelta(days=days)).timestamp() * 1000)
+        where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
+        params.append(rolling_start_ms)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -913,10 +1023,11 @@ async def cost_daily(
             FROM records{where}
             GROUP BY day, provider, model
             ORDER BY day DESC, cost DESC
-        """, params)
+            LIMIT ?
+        """, params + [row_limit])
         
         daily = []
-        for row in cursor.fetchall():
+        for row in cursor:
             daily.append({
                 "day": row[0],
                 "provider": row[1],
@@ -925,7 +1036,14 @@ async def cost_daily(
                 "cost": round(row[4] or 0, 6),
             })
     
-    return {"daily": daily}
+    return {
+        "daily": daily,
+        "window_days": days if (start is None and end is None) else None,
+        "row_limit": row_limit,
+        "truncated": len(daily) >= row_limit,
+        "configured_providers": _configured_providers(),
+        "configured_models": _configured_models(),
+    }
 
 
 @app.get("/api/cost/projection")
@@ -996,7 +1114,9 @@ async def ratelimits():
     Rate limits are per model family (e.g. claude-haiku includes all haiku variants).
     Usage is aggregated across all models in each family.
     """
+    _reload_config_from_disk()
     rate_cfg = CONFIG.get("rate_limits", {})
+    configured_providers = _configured_providers()
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -1014,8 +1134,19 @@ async def ratelimits():
             GROUP BY model
         """, (one_min_ago,))
         raw_1m = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             raw_1m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
+
+        cursor.execute("""
+            SELECT provider, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
+                   COALESCE(SUM(tokens_input + tokens_cache_read + tokens_cache_write), 0) as input_tokens,
+                   COALESCE(SUM(tokens_output), 0) as output_tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY provider
+        """, (one_min_ago,))
+        provider_1m = {}
+        for row in cursor:
+            provider_1m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
 
         # Per-model usage in last 5 minutes (for peak-minute calculation)
         cursor.execute("""
@@ -1026,8 +1157,19 @@ async def ratelimits():
             GROUP BY model
         """, (five_min_ago,))
         raw_5m = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             raw_5m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
+
+        cursor.execute("""
+            SELECT provider, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens,
+                   COALESCE(SUM(tokens_input + tokens_cache_read + tokens_cache_write), 0) as input_tokens,
+                   COALESCE(SUM(tokens_output), 0) as output_tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY provider
+        """, (five_min_ago,))
+        provider_5m = {}
+        for row in cursor:
+            provider_5m[row[0]] = {"rpm": row[1], "tpm": row[2], "input_tpm": row[3], "output_tpm": row[4]}
 
         # Per-model usage in last 1 hour
         cursor.execute("""
@@ -1038,8 +1180,17 @@ async def ratelimits():
             GROUP BY model
         """, (one_hour_ago,))
         raw_1h = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             raw_1h[row[0]] = {"rph": row[1], "tph": row[2]}
+
+        cursor.execute("""
+            SELECT provider, COUNT(*) as calls, COALESCE(SUM(tokens_total), 0) as tokens
+            FROM records WHERE timestamp >= ?
+            GROUP BY provider
+        """, (one_hour_ago,))
+        provider_1h = {}
+        for row in cursor:
+            provider_1h[row[0]] = {"rph": row[1], "tph": row[2]}
 
         # Recent rate limit errors (last 1 hour) — stop_reason='error' with 0 tokens
         cursor.execute("""
@@ -1049,8 +1200,18 @@ async def ratelimits():
             GROUP BY model
         """, (one_hour_ago,))
         rate_limit_errors = {}
-        for row in cursor.fetchall():
+        for row in cursor:
             rate_limit_errors[row[0]] = {"last_error": row[1], "error_count": row[2]}
+
+        cursor.execute("""
+            SELECT provider, MAX(timestamp) as last_error, COUNT(*) as error_count
+            FROM records
+            WHERE timestamp >= ? AND stop_reason = 'error' AND tokens_total = 0
+            GROUP BY provider
+        """, (one_hour_ago,))
+        provider_errors = {}
+        for row in cursor:
+            provider_errors[row[0]] = {"last_error": row[1], "error_count": row[2]}
 
         # All known models
         cursor.execute("SELECT DISTINCT model FROM records ORDER BY model")
@@ -1099,8 +1260,27 @@ async def ratelimits():
             "rate_limit_errors": agg_errors if agg_errors["error_count"] > 0 else None,
         }
 
+    providers = {}
+    for provider_name in configured_providers:
+        provider_cfg = rate_cfg.get(provider_name, {})
+        if not isinstance(provider_cfg, dict):
+            provider_cfg = {}
+        provider_models = provider_cfg.get("models", [])
+        limits = {k: v for k, v in provider_cfg.items() if k not in {"models", "auto_detected"}}
+        providers[provider_name] = {
+            "limits": limits,
+            "models": provider_models,
+            "auto_detected": bool(provider_cfg.get("auto_detected")),
+            "usage_1m": provider_1m.get(provider_name, {"rpm": 0, "tpm": 0, "input_tpm": 0, "output_tpm": 0}),
+            "usage_5m": provider_5m.get(provider_name, {"rpm": 0, "tpm": 0, "input_tpm": 0, "output_tpm": 0}),
+            "usage_1h": provider_1h.get(provider_name, {"rph": 0, "tph": 0}),
+            "rate_limit_errors": provider_errors.get(provider_name),
+        }
+
     return {
         "families": families,
+        "providers": providers,
+        "configured_providers": configured_providers,
         "all_models": all_models,
     }
 
@@ -1167,7 +1347,7 @@ async def ratelimits_update(
 
 def _compute_spend_entry(member_models, daily_limit, monthly_limit, reset_date_str, daily_cost_by_model):
     """Compute spend usage for a set of models with given limits."""
-    now = datetime.utcnow()
+    now = _utc_now()
     month_start_ms = int(now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
 
     # Period cost since reset_date or start of month
@@ -1233,7 +1413,7 @@ async def spendlimits():
     # Pre-fetch daily costs per model
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
-        today_start_ms = int(datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        today_start_ms = int(_utc_now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         cursor.execute("""
             SELECT model, COALESCE(SUM(cost_total), 0) as cost
             FROM records WHERE timestamp >= ?
@@ -1346,12 +1526,32 @@ async def refresh():
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
-    """Handle unexpected exceptions."""
-    logger.error(f"Unhandled exception: {exc}")
-    return {
-        "error": str(exc),
-        "status": 500,
-    }
+    """Handle unexpected exceptions gracefully, including MemoryError."""
+    try:
+        logger.error(f"Unhandled exception: {exc}")
+        # For MemoryError, return a minimal response to avoid cascading failures
+        if isinstance(exc, MemoryError):
+            import gc
+            gc.collect()
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Server out of memory", "status": 503},
+            )
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(exc),
+                "status": 500,
+            },
+        )
+    except Exception:
+        # Last-resort fallback: if even JSONResponse fails, return raw bytes
+        from starlette.responses import Response
+        return Response(
+            content=b'{"error":"internal error","status":500}',
+            status_code=500,
+            media_type="application/json",
+        )
 
 
 if __name__ == "__main__":
