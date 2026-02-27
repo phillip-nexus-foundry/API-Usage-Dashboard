@@ -4,18 +4,20 @@ const COLORS_PALETTE = [
     '#58a6ff','#3fb950','#f85149','#d29922','#bc8ef6','#39d2c0','#f0e443','#ff6b9d',
 ];
 
-// Stable provider-to-color map — hardcoded preferred assignments, fallback to palette
-let providerColorMap = {
-    'moonshot': '#58a6ff',   // blue
-    'anthropic': '#3fb950',  // green
-    'openclaw': '#f85149',   // red
-};
+// Stable provider-to-color map — fully dynamic and persisted in localStorage
+let providerColorMap = {};
+try {
+    providerColorMap = JSON.parse(localStorage.getItem('dash_providerColorMap') || '{}') || {};
+} catch {
+    providerColorMap = {};
+}
 function getProviderColor(provider) {
     if (!providerColorMap[provider]) {
         // Assign next unused palette color
         const usedColors = new Set(Object.values(providerColorMap));
         const available = COLORS_PALETTE.filter(c => !usedColors.has(c));
         providerColorMap[provider] = available.length > 0 ? available[0] : COLORS_PALETTE[Object.keys(providerColorMap).length % COLORS_PALETTE.length];
+        try { localStorage.setItem('dash_providerColorMap', JSON.stringify(providerColorMap)); } catch {}
     }
     return providerColorMap[provider];
 }
@@ -38,7 +40,7 @@ let currentPage = loadState('page', 1);
 let callsPerPage = loadState('perPage', 50);
 let useUTC = loadState('useUTC', false);
 let hiddenProviders = loadState('hiddenProviders', []);
-let selectedProject = loadState('selectedProject', {}); // { moonshot: '__all__' }
+let selectedProject = loadState('selectedProject', {}); // { provider: '__all__' }
 
 // Saved filter/range values (applied after DOM ready)
 const savedFilters = {
@@ -412,9 +414,51 @@ function populateFilters() {
 // ============================================================================
 // BALANCE TRACKER (dynamic, sortable, toggleable)
 // ============================================================================
+function _captureBalanceState() {
+    // Capture expanded ledgers, input values, and focused element
+    const state = { expandedLedgers: new Set(), inputs: {}, focusId: null };
+    document.querySelectorAll('.balance-ledger-entries.open').forEach(el => {
+        state.expandedLedgers.add(el.id);
+    });
+    document.querySelectorAll('#balanceTracker input, #balanceTracker select').forEach(el => {
+        if (el.id) state.inputs[el.id] = el.value;
+    });
+    const active = document.activeElement;
+    if (active && active.id && document.getElementById('balanceTracker')?.contains(active)) {
+        state.focusId = active.id;
+    }
+    return state;
+}
+
+function _restoreBalanceState(state) {
+    // Restore expanded ledgers
+    state.expandedLedgers.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) {
+            el.classList.add('open');
+            // Update the toggle text to match
+            const toggle = el.previousElementSibling;
+            if (toggle && toggle.classList.contains('balance-ledger-toggle')) {
+                toggle.textContent = toggle.textContent.replace('+ Deposits', '- Hide deposits');
+            }
+        }
+    });
+    // Restore input values
+    for (const [id, val] of Object.entries(state.inputs)) {
+        const el = document.getElementById(id);
+        if (el) el.value = val;
+    }
+    // Restore focus
+    if (state.focusId) {
+        const el = document.getElementById(state.focusId);
+        if (el) el.focus();
+    }
+}
+
 function renderBalance() {
     const b = allData.balance;
     if (!b) return;
+    const uiState = _captureBalanceState();
     const container = document.getElementById('balanceTracker');
     const togglesContainer = document.getElementById('balanceToggles');
     container.innerHTML = '';
@@ -460,19 +504,22 @@ function renderBalance() {
 
         // Determine what data to display based on project selection
         let displayData = data;
-        let displayLedger = data.ledger || [];
+        let displayLedger = Array.isArray(data.ledger) ? data.ledger : [];
         let activeProject = null;
         if (hasProjects && curProj !== '__all__' && data.projects[curProj]) {
             activeProject = curProj;
             displayData = data.projects[curProj];
-            displayLedger = displayData.ledger || [];
+            displayLedger = Array.isArray(displayData.ledger) ? displayData.ledger : [];
         }
 
         const status = displayData.status || data.status || 'unknown';
         const statusLabel = status==='ok'?'OK':status==='warn'?'LOW':status==='critical'?'CRITICAL':status.replace(/_/g,' ').toUpperCase();
         const colorClass = ['ok','warn','critical'].includes(status) ? status : 'unknown';
-        const hasLedger = Array.isArray(displayLedger) && displayLedger.length > 0;
-        const hasApiKey = data.api_note || (!hasLedger && data.remaining !== undefined && !hasProjects);
+        const ledgerConfigured =
+            Object.prototype.hasOwnProperty.call(displayData, 'ledger') ||
+            Object.prototype.hasOwnProperty.call(data, 'ledger');
+        const hasLedgerEntries = Array.isArray(displayLedger) && displayLedger.length > 0;
+        const hasApiKey = data.api_note || (!ledgerConfigured && data.remaining !== undefined && !hasProjects);
 
         let remainingText = '—', detailText = '';
         const rem = displayData.remaining !== undefined ? displayData.remaining : data.remaining;
@@ -519,22 +566,24 @@ function renderBalance() {
         if (detailText) html += `<div class="balance-detail">${detailText}</div>`;
         if (usageLine) html += `<div class="balance-detail">${usageLine}</div>`;
 
-        if (hasLedger) {
+        if (ledgerConfigured) {
             const ledgerId = `ledger-${name}-${activeProject||'all'}`;
             html += `<div class="balance-ledger">
                 <div class="balance-ledger-toggle" onclick="document.getElementById('${ledgerId}').classList.toggle('open');this.textContent=this.textContent.includes('+')?'- Hide deposits':'+ Deposits (${displayLedger.length})'">+ Deposits (${displayLedger.length})</div>
                 <div class="balance-ledger-entries" id="${ledgerId}">`;
-            displayLedger.forEach((e, idx) => {
-                const cls = e.is_voucher ? 'balance-ledger-voucher' : '';
-                const projTag = (!activeProject && e.project) ? `<span style="color:var(--text-secondary);font-size:10px;">[${e.project}]</span> ` : '';
-                const deleteProject = activeProject || e.project || '';
-                html += `<div class="balance-ledger-entry ${cls}">
-                    <span class="balance-ledger-date">${e.date}</span>
-                    <span class="balance-ledger-note">${projTag}${e.note||''}</span>
-                    <span class="balance-ledger-amount">${e.is_voucher?'':'+'}\$${(e.amount||0).toFixed(2)}${e.is_voucher?' (voucher)':''}</span>
-                    <button class="ledger-delete-btn" onclick="deleteLedgerEntry('${name}',${idx},'${deleteProject}')" title="Remove this entry">&times;</button>
-                </div>`;
-            });
+            if (hasLedgerEntries) {
+                displayLedger.forEach((e, idx) => {
+                    const cls = e.is_voucher ? 'balance-ledger-voucher' : '';
+                    const projTag = (!activeProject && e.project) ? `<span style="color:var(--text-secondary);font-size:10px;">[${e.project}]</span> ` : '';
+                    const deleteProject = activeProject || e.project || '';
+                    html += `<div class="balance-ledger-entry ${cls}">
+                        <span class="balance-ledger-date">${e.date}</span>
+                        <span class="balance-ledger-note">${projTag}${e.note||''}</span>
+                        <span class="balance-ledger-amount">${e.is_voucher?'':'+'}\$${(e.amount||0).toFixed(2)}${e.is_voucher?' (voucher)':''}</span>
+                        <button class="ledger-delete-btn" onclick="deleteLedgerEntry('${name}',${idx},'${deleteProject}')" title="Remove this entry">&times;</button>
+                    </div>`;
+                });
+            }
             html += `</div></div>`;
 
             // Top-up form — for multi-project, include project selector
@@ -562,6 +611,9 @@ function renderBalance() {
         card.innerHTML = html;
         container.appendChild(card);
     }
+
+    // Restore UI state (expanded ledgers, input values, focus)
+    _restoreBalanceState(uiState);
 
     // Setup horizontal wheel scrolling
     setupBalanceScroll();
@@ -1543,3 +1595,4 @@ function showToast(message, type='info') {
     c.appendChild(t);
     setTimeout(() => t.remove(), 5000);
 }
+

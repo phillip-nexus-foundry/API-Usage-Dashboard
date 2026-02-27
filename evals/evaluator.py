@@ -3,12 +3,16 @@ Automated evaluations (8 evaluations, no LLM calls needed).
 Scores are computed from telemetry data.
 """
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from typing import List, Dict, Any
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _utc_iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass
@@ -87,7 +91,7 @@ class Evaluator:
             grade=grade,
             details=f"{error_rate*100:.2f}% error rate ({stats.get('error_count', 0)}/{count} calls)",
             count=count,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_cache_efficiency(self, reader) -> EvalResult:
@@ -124,7 +128,7 @@ class Evaluator:
             grade=grade,
             details=f"{avg_cache_hit*100:.1f}% average cache hit ratio",
             count=count,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_cost_efficiency(self, reader) -> EvalResult:
@@ -163,7 +167,7 @@ class Evaluator:
             grade=grade,
             details=f"${cost_per_token:.2f} per million tokens",
             count=count,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_tool_utilization(self, reader) -> EvalResult:
@@ -205,7 +209,7 @@ class Evaluator:
             grade=grade,
             details=f"{tool_pct*100:.1f}% of calls use tools ({tool_calls}/{total_calls})",
             count=total_calls,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_abort_rate(self, reader) -> EvalResult:
@@ -246,7 +250,7 @@ class Evaluator:
             grade=grade,
             details=f"{abort_rate*100:.2f}% of calls ended early ({aborts}/{total_calls})",
             count=total_calls,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_output_density(self, reader) -> EvalResult:
@@ -279,7 +283,7 @@ class Evaluator:
             grade=grade,
             details=f"{avg_density*100:.1f}% of tokens are outputs (high productivity)",
             count=count,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_thinking_usage(self, reader) -> EvalResult:
@@ -320,7 +324,7 @@ class Evaluator:
             grade=grade,
             details=f"{thinking_pct*100:.1f}% of calls use reasoning ({thinking_calls}/{total_calls})",
             count=total_calls,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )
     
     def _eval_provider_diversity(self, reader) -> EvalResult:
@@ -354,5 +358,5 @@ class Evaluator:
             grade=grade,
             details=details,
             count=total_calls,
-            timestamp=datetime.utcnow().isoformat() + "Z",
+            timestamp=_utc_iso_now(),
         )

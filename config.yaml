@@ -8,6 +8,21 @@ balance:
     - date: '2026-02-01'
       amount: 20.0
       note: Initial API credits
+    - date: '2026-02-27'
+      amount: 30.0
+      note: Tier 2 top up
+    verified_usage_cost: 25.35
+    verified_usage_note: "Calibrated Feb 27 2026 9:39 AM PST against Claude site ($24.65\
+      \ remaining of $50). Historical session files purged by OpenClaw \xE2\u20AC\u201D\
+      \ computed cost underreports due to missing data. Going-forward pricing is correct\
+      \ (Opus 4.6 rates fixed)."
+    warn_threshold: 5.0
+    critical_threshold: 2.0
+  minimax:
+    ledger:
+    - date: '2026-02-27'
+      amount: 25.0
+      note: Initial Deposit
     warn_threshold: 5.0
     critical_threshold: 2.0
   moonshot:
@@ -36,10 +51,10 @@ balance:
           note: Third top-up
 model_costs:
   claude-opus-4-6:
-    input: 15.0
-    output: 75.0
-    cache_read: 1.5
-    cache_write: 18.75
+    input: 5.0
+    output: 25.0
+    cache_read: 0.5
+    cache_write: 6.25
   claude-sonnet-4-6:
     input: 3.0
     output: 15.0
@@ -82,27 +97,27 @@ model_costs:
     cache_write: 0.2
 rate_limits:
   claude-opus:
-    rpm: 50
-    tpm: 38000
-    input_tpm: 30000
-    output_tpm: 8000
+    rpm: 1000
+    tpm: 540000
+    input_tpm: 450000
+    output_tpm: 90000
     models:
     - claude-opus-4-6
     auto_detected: true
   claude-sonnet:
-    rpm: 50
-    tpm: 38000
-    input_tpm: 30000
-    output_tpm: 8000
+    rpm: 1000
+    tpm: 540000
+    input_tpm: 450000
+    output_tpm: 90000
     models:
     - claude-sonnet-4-6
     - claude-3-5-sonnet-20241022
     auto_detected: true
   claude-haiku:
-    rpm: 50
-    tpm: 60000
-    input_tpm: 50000
-    output_tpm: 10000
+    rpm: 1000
+    tpm: 540000
+    input_tpm: 450000
+    output_tpm: 90000
     models:
     - claude-haiku-4-5
     - claude-haiku-4-5-20251001
@@ -116,6 +131,10 @@ rate_limits:
     - kimi-k2.5
     - moonshot-v1-8k
     note: Tier2 global limits; per-project limits via API key
+  minimax:
+    rpm: 500
+    tpm: 300000
+    models: []
 spend_limits:
   anthropic:
     monthly: 20.0

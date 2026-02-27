@@ -11,7 +11,12 @@ from typing import List, Dict, Optional, Any
 from dataclasses import asdict
 import logging
 
-from .telemetry_schema import TelemetryRecord, compute_dollar_cost
+from .telemetry_schema import (
+    TelemetryRecord,
+    compute_cost_breakdown,
+    is_anthropic_model,
+    anthropic_billable_cache_write_delta,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -178,6 +183,9 @@ class OpenClawReader:
         """
         records = []
         session_id = None
+        # Track last seen raw cacheWrite per (session_id, model) within this file parse.
+        # OpenClaw can emit cumulative cacheWrite counters for Anthropic models.
+        cache_write_state: Dict[tuple, int] = {}
         
         with open(filepath, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
@@ -197,7 +205,7 @@ class OpenClawReader:
                     if obj.get("type") == "message":
                         message = obj.get("message", {})
                         if message.get("role") == "assistant" and message.get("usage"):
-                            record = self._message_to_record(session_id, obj, filepath.stem)
+                            record = self._message_to_record(session_id, obj, filepath.stem, cache_write_state)
                             if record:
                                 records.append(record)
                 
@@ -212,7 +220,13 @@ class OpenClawReader:
         
         return records
     
-    def _message_to_record(self, session_id: Optional[str], msg_obj: Dict[str, Any], filename: str) -> Optional[TelemetryRecord]:
+    def _message_to_record(
+        self,
+        session_id: Optional[str],
+        msg_obj: Dict[str, Any],
+        filename: str,
+        cache_write_state: Optional[Dict[tuple, int]] = None,
+    ) -> Optional[TelemetryRecord]:
         """
         Convert a message object to a TelemetryRecord.
         Returns None if required fields are missing.
@@ -241,29 +255,39 @@ class OpenClawReader:
             has_tool_calls = any(c.get("type") == "toolCall" for c in content)
             tool_names = [c.get("name", "") for c in content if c.get("type") == "toolCall"]
 
+            model = message.get("model", "unknown")
+            session_key = session_id or "unknown"
+            billable_cache_write = tokens_cache_write
+
+            # Anthropic cacheWrite in OpenClaw can be cumulative; charge only deltas.
+            if cache_write_state is not None and is_anthropic_model(model):
+                key = (session_key, model)
+                prev_highwater = cache_write_state.get(key)
+                billable_cache_write = anthropic_billable_cache_write_delta(prev_highwater, tokens_cache_write)
+                if prev_highwater is None:
+                    cache_write_state[key] = tokens_cache_write
+                else:
+                    cache_write_state[key] = max(prev_highwater, tokens_cache_write)
+
             # Compute cost independently from token counts (reliable)
             # Includes Moonshot web surcharges based on tool_names
-            model = message.get("model", "unknown")
-            computed_cost = compute_dollar_cost(
-                model, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write,
+            breakdown = compute_cost_breakdown(
+                model=model,
+                tokens_input=tokens_input,
+                tokens_output=tokens_output,
+                tokens_cache_read=tokens_cache_read,
+                tokens_cache_write_billable=billable_cache_write,
                 tool_names=tool_names,
             )
-            
-            # Use computed cost (ignore stored cost due to OpenClaw bug)
-            cost_total = computed_cost
-            
-            # Proportionally allocate cost to input/output/cache based on token ratios
-            if tokens_total > 0:
-                cost_input = (tokens_input / tokens_total) * computed_cost
-                cost_output = (tokens_output / tokens_total) * computed_cost
-                cost_cache_read = (tokens_cache_read / tokens_total) * computed_cost
-                cost_cache_write = (tokens_cache_write / tokens_total) * computed_cost
-            else:
-                cost_input = cost_output = cost_cache_read = cost_cache_write = 0.0
+            cost_input = breakdown["cost_input"]
+            cost_output = breakdown["cost_output"]
+            cost_cache_read = breakdown["cost_cache_read"]
+            cost_cache_write = breakdown["cost_cache_write"]
+            cost_total = breakdown["cost_total"]
             
             # Sanity check: if stored cost is reasonable (< $10 per call), log a warning
-            if 0 < stored_cost_total < 10 and abs(stored_cost_total - computed_cost) > 0.01:
-                logger.debug(f"Cost mismatch: stored=${stored_cost_total:.4f}, computed=${computed_cost:.4f}")
+            if 0 < stored_cost_total < 10 and abs(stored_cost_total - cost_total) > 0.01:
+                logger.debug(f"Cost mismatch: stored=${stored_cost_total:.4f}, computed=${cost_total:.4f}")
             
             # Cache hit ratio
             cache_denominator = tokens_cache_read + tokens_input

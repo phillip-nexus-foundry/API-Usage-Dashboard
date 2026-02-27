@@ -3,7 +3,7 @@ Canonical telemetry schema for API usage tracking.
 24-field TelemetryRecord dataclass with model costs and cost computation.
 """
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict, Any
 from datetime import datetime
 
 
@@ -39,13 +39,18 @@ class TelemetryRecord:
 
 # Model costs: per 1M tokens (input, output, cache_read, cache_write)
 # From Anthropic pricing and Moonshot pricing sheets
+#
+# WARNING: OpenClaw telemetry reports cumulative cache size in the cacheWrite
+# field for Anthropic models, not the tokens actually written in that call.
+# This can cause massive overcharging if cache_write costs are applied to
+# every call. See: fixes/cache-write-cost-bug.md for details.
 MODEL_COSTS = {
     # Anthropic Claude models (current naming)
     "claude-opus-4-6": {
-        "input": 15.00,
-        "output": 75.00,
-        "cache_read": 1.50,
-        "cache_write": 18.75,
+        "input": 5.00,
+        "output": 25.00,
+        "cache_read": 0.50,
+        "cache_write": 6.25,
     },
     "claude-sonnet-4-6": {
         "input": 3.00,
@@ -118,6 +123,71 @@ WEB_TOOL_SURCHARGE = 0.01
 WEB_TOOL_NAMES = {"web_search", "web_fetch", "browser"}
 
 
+def is_anthropic_model(model: str) -> bool:
+    """Best-effort model classifier for Anthropic Claude model IDs."""
+    return model.startswith("claude")
+
+
+def anthropic_billable_cache_write_delta(previous_highwater: Optional[int], current_raw: int) -> int:
+    """
+    Convert Anthropic cumulative cacheWrite telemetry into per-call billable tokens
+    using a high-watermark strategy:
+    - First seen value is billable (assume stream starts at billing boundary)
+    - Subsequent values only bill when exceeding the historical max
+    - Decreases/resets do not create negative bills and do not re-bill old ranges
+    """
+    if previous_highwater is None:
+        return max(0, current_raw)
+    if current_raw > previous_highwater:
+        return current_raw - previous_highwater
+    return 0
+
+
+def compute_cost_breakdown(
+    model: str,
+    tokens_input: int,
+    tokens_output: int,
+    tokens_cache_read: int,
+    tokens_cache_write_billable: int,
+    tool_names: Optional[list] = None,
+) -> Dict[str, Any]:
+    """
+    Compute per-component and total USD costs.
+
+    tokens_cache_write_billable should be the per-call billable cache-write tokens.
+    For Anthropic telemetry this may differ from raw cacheWrite if the source value
+    is cumulative.
+    """
+    costs = MODEL_COSTS.get(model, {
+        "input": 0.0,
+        "output": 0.0,
+        "cache_read": 0.0,
+        "cache_write": 0.0,
+    })
+
+    cost_input = tokens_input * costs["input"] / 1_000_000
+    cost_output = tokens_output * costs["output"] / 1_000_000
+    cost_cache_read = tokens_cache_read * costs["cache_read"] / 1_000_000
+    cost_cache_write = tokens_cache_write_billable * costs["cache_write"] / 1_000_000
+
+    web_surcharge_count = 0
+    if tool_names:
+        web_surcharge_count = sum(1 for t in tool_names if t in WEB_TOOL_NAMES)
+    cost_web_surcharge = web_surcharge_count * WEB_TOOL_SURCHARGE
+
+    total = cost_input + cost_output + cost_cache_read + cost_cache_write + cost_web_surcharge
+
+    return {
+        "cost_input": round(cost_input, 6),
+        "cost_output": round(cost_output, 6),
+        "cost_cache_read": round(cost_cache_read, 6),
+        "cost_cache_write": round(cost_cache_write, 6),
+        "cost_web_surcharge": round(cost_web_surcharge, 6),
+        "cost_total": round(total, 6),
+        "web_surcharge_count": web_surcharge_count,
+    }
+
+
 def compute_dollar_cost(
     model: str,
     tokens_input: int,
@@ -141,23 +211,12 @@ def compute_dollar_cost(
     Returns:
         Total USD cost (float, rounded to 6 decimals)
     """
-    costs = MODEL_COSTS.get(model, {
-        "input": 0.0,
-        "output": 0.0,
-        "cache_read": 0.0,
-        "cache_write": 0.0,
-    })
-
-    cost = (
-        (tokens_input * costs["input"] / 1_000_000) +
-        (tokens_output * costs["output"] / 1_000_000) +
-        (tokens_cache_read * costs["cache_read"] / 1_000_000) +
-        (tokens_cache_write * costs["cache_write"] / 1_000_000)
+    breakdown = compute_cost_breakdown(
+        model=model,
+        tokens_input=tokens_input,
+        tokens_output=tokens_output,
+        tokens_cache_read=tokens_cache_read,
+        tokens_cache_write_billable=tokens_cache_write,
+        tool_names=tool_names,
     )
-
-    # Add Moonshot web operation surcharges
-    if tool_names:
-        web_calls = sum(1 for t in tool_names if t in WEB_TOOL_NAMES)
-        cost += web_calls * WEB_TOOL_SURCHARGE
-
-    return round(cost, 6)
+    return breakdown["cost_total"]

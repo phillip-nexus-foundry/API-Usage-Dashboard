@@ -5,34 +5,17 @@ Supports two modes per provider:
   - "api": Live balance fetched from provider's API (with ledger fallback)
 """
 import os
-import json
 import httpx
-import yaml
 import sqlite3
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Path to store last known API balances for auto top-up detection
-_LAST_BALANCE_FILE = os.path.join(os.path.dirname(__file__), ".last_api_balances.json")
-
-
-def _load_last_balances() -> Dict[str, float]:
-    try:
-        with open(_LAST_BALANCE_FILE, "r") as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {}
-
-
-def _save_last_balances(data: Dict[str, float]):
-    try:
-        with open(_LAST_BALANCE_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        logger.warning(f"Failed to save last balances: {e}")
+_PROVIDER_ALIASES = {
+    "minimax": ["minimax", "mini_max", "minimaxai"],
+}
 
 
 class BalanceChecker:
@@ -41,6 +24,10 @@ class BalanceChecker:
     def __init__(self, config: Dict[str, Any], config_path: str = None):
         self.config = config
         self.config_path = config_path
+
+    @staticmethod
+    def _utc_now() -> datetime:
+        return datetime.now(timezone.utc)
 
     async def check_balances(self, reader) -> Dict[str, Any]:
         """Check balances for all providers configured under balance: in config."""
@@ -79,8 +66,6 @@ class BalanceChecker:
                         result["status"] = "warn"
                     else:
                         result["status"] = "ok"
-                    # Auto-detect top-ups: if API balance went up, add ledger entry
-                    self._detect_topup(name, api_balance, cfg)
                 else:
                     result["balance_source"] = "ledger"
                     result["api_note"] = api_result.get("message", "API unavailable")
@@ -92,15 +77,15 @@ class BalanceChecker:
             # If API succeeded (got a remaining value), return it
             if api_result.get("remaining") is not None:
                 return api_result
-            # API failed — fall back to ledger if available
-            if cfg.get("ledger"):
+            # API failed - fall back to ledger if configured (including empty [])
+            if "ledger" in cfg:
                 ledger_result = self._check_ledger(name, cfg, reader)
                 ledger_result["api_note"] = api_result.get("message", "API unavailable")
                 return ledger_result
             return api_result
 
         # Ledger-only provider
-        if cfg.get("ledger"):
+        if "ledger" in cfg:
             return self._check_ledger(name, cfg, reader)
 
         return {
@@ -180,75 +165,61 @@ class BalanceChecker:
             logger.error(f"Failed to check {name} multi-project balance: {e}")
             return {"status": "error", "message": str(e)}
 
-    def _detect_topup(self, provider_name: str, current_balance: float, cfg: Dict[str, Any]):
-        """Detect if API balance increased (top-up) and auto-add a ledger entry."""
-        last_balances = _load_last_balances()
-        last_balance = last_balances.get(provider_name)
-
-        # Save current balance for next comparison
-        last_balances[provider_name] = current_balance
-        _save_last_balances(last_balances)
-
-        if last_balance is None:
-            # First time seeing this provider — no comparison possible
-            return
-
-        increase = current_balance - last_balance
-        if increase <= 0.01:
-            # Balance didn't go up (or negligible rounding)
-            return
-
-        # Balance went up — auto-add ledger entry
-        amount = round(increase, 2)
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        entry = {
-            "date": today,
-            "amount": amount,
-            "note": "Auto-detected top-up",
-        }
-
-        # Find the first project's ledger to add to
-        if cfg.get("projects"):
-            for proj_name, proj_cfg in cfg["projects"].items():
-                if isinstance(proj_cfg, dict):
-                    if "ledger" not in proj_cfg:
-                        proj_cfg["ledger"] = []
-                    proj_cfg["ledger"].append(entry)
-                    logger.info(f"Auto-detected top-up for {provider_name}/{proj_name}: +${amount:.2f}")
-                    break
-        elif "ledger" in cfg:
-            cfg["ledger"].append(entry)
-            logger.info(f"Auto-detected top-up for {provider_name}: +${amount:.2f}")
-
-        # Persist to config.yaml
-        if self.config_path:
-            try:
-                with open(self.config_path, "w") as f:
-                    yaml.dump(self.config, f, default_flow_style=False, sort_keys=False)
-            except Exception as e:
-                logger.error(f"Failed to save auto-detected top-up to config.yaml: {e}")
-
     def _check_ledger(
         self, provider_name: str, cfg: Dict[str, Any], reader
     ) -> Dict[str, Any]:
         """Calculate balance: sum(ledger) - cumulative cost for THIS provider only."""
         try:
             ledger = cfg.get("ledger", [])
-            if not ledger:
+            if ledger is None:
+                ledger = []
+            if not isinstance(ledger, list):
                 return {
                     "status": "not_configured",
-                    "message": "Add ledger entries to config.yaml",
+                    "message": "Ledger must be a list in config.yaml",
+                }
+
+            warn_threshold = cfg.get("warn_threshold", 20.0)
+            critical_threshold = cfg.get("critical_threshold", 5.0)
+
+            # A configured but empty ledger should still be treated as active so
+            # the deposit interface remains available.
+            if len(ledger) == 0:
+                return {
+                    "status": "warn",
+                    "total_deposits": 0.0,
+                    "cumulative_cost": 0.0,
+                    "raw_cumulative_cost": 0.0,
+                    "cost_source": "computed",
+                    "remaining": 0.0,
+                    "warn_threshold": warn_threshold,
+                    "critical_threshold": critical_threshold,
                 }
 
             total_deposits = sum(entry.get("amount", 0) for entry in ledger)
 
-            # Query cost for THIS provider only
-            cumulative_cost = self._get_provider_cost(reader, provider_name)
+            # Query cost for THIS provider only (with optional reconciliation override)
+            raw_cumulative_cost = self._get_provider_cost(reader, provider_name)
+            cumulative_cost = raw_cumulative_cost
+            cost_source = "computed"
+
+            if cfg.get("verified_usage_cost") is not None:
+                try:
+                    cumulative_cost = float(cfg.get("verified_usage_cost"))
+                    cost_source = "verified_override"
+                except (TypeError, ValueError):
+                    cumulative_cost = raw_cumulative_cost
+                    cost_source = "computed"
+            elif cfg.get("usage_cost_adjustment") is not None:
+                try:
+                    adjustment = float(cfg.get("usage_cost_adjustment"))
+                    cumulative_cost = raw_cumulative_cost + adjustment
+                    cost_source = "computed_plus_adjustment"
+                except (TypeError, ValueError):
+                    cumulative_cost = raw_cumulative_cost
+                    cost_source = "computed"
 
             remaining = total_deposits - cumulative_cost
-
-            warn_threshold = cfg.get("warn_threshold", 20.0)
-            critical_threshold = cfg.get("critical_threshold", 5.0)
 
             status = "ok"
             if remaining <= critical_threshold:
@@ -260,6 +231,8 @@ class BalanceChecker:
                 "status": status,
                 "total_deposits": round(total_deposits, 2),
                 "cumulative_cost": round(cumulative_cost, 6),
+                "raw_cumulative_cost": round(raw_cumulative_cost, 6),
+                "cost_source": cost_source,
                 "remaining": round(remaining, 2),
                 "warn_threshold": warn_threshold,
                 "critical_threshold": critical_threshold,
@@ -271,11 +244,13 @@ class BalanceChecker:
 
     def _get_provider_cost(self, reader, provider_name: str) -> float:
         """Get total cost for a specific provider from the database."""
+        aliases = _PROVIDER_ALIASES.get(provider_name, [provider_name])
+        placeholders = ",".join("?" * len(aliases))
         with sqlite3.connect(reader.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE provider = ?",
-                (provider_name,),
+                f"SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE provider IN ({placeholders})",
+                aliases,
             )
             return cursor.fetchone()[0]
 

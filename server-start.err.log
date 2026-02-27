@@ -1,0 +1,11 @@
+INFO:     Started server process [7948]
+INFO:     Waiting for application startup.
+INFO:app:Scanning session files...
+INFO:app:Watching C:/Users/AI-Agents/.openclaw/agents/main/sessions for changes
+INFO:app:Probing APIs for rate limits...
+WARNING:app:Failed to probe rate limits for claude-opus: All connection attempts failed
+WARNING:app:Failed to probe rate limits for claude-sonnet: All connection attempts failed
+WARNING:app:Failed to probe rate limits for claude-haiku: All connection attempts failed
+INFO:app:Startup complete
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8062 (Press CTRL+C to quit)
