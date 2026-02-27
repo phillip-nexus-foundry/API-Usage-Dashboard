@@ -126,6 +126,52 @@ function getKpiRangeParams() {
     return `&start=${start.getTime()}&end=${now.getTime()}`;
 }
 
+function getContainingKpiRangeInfo() {
+    const range = document.getElementById('kpiRangeSelect').value;
+    const rolling = document.getElementById('kpiRollingToggle').checked;
+    const now = new Date();
+    let start = null;
+    let meta = '';
+
+    if (rolling) {
+        // Rolling: compare to rolling 7d, 30d, 365d windows
+        if (range === 'today') {
+            start = new Date(now.getTime() - 7*86400000);
+            meta = 'Today of Week';
+        } else if (range === 'week') {
+            start = new Date(now.getTime() - 30*86400000);
+            meta = 'Week of Month';
+        } else if (range === 'month') {
+            start = new Date(now.getTime() - 365*86400000);
+            meta = 'Month of Year';
+        } else {
+            return { supported:false, params:'', meta:'—' };
+        }
+    } else {
+        // Calendar: compare to calendar week (Sun-Sat), month, year
+        if (range === 'today') {
+            // Sunday-starting week
+            start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+            start.setDate(start.getDate() - start.getDay());
+            meta = 'Today of Week';
+        } else if (range === 'week') {
+            start = new Date(now.getFullYear(), now.getMonth(), 1);
+            meta = 'Week of Month';
+        } else if (range === 'month') {
+            start = new Date(now.getFullYear(), 0, 1);
+            meta = 'Month of Year';
+        } else {
+            return { supported:false, params:'', meta:'—' };
+        }
+    }
+
+    return {
+        supported: true,
+        params: `&start=${start.getTime()}&end=${now.getTime()}`,
+        meta,
+    };
+}
+
 function getKpiRangeLabel() {
     const range = document.getElementById('kpiRangeSelect').value;
     const rolling = document.getElementById('kpiRollingToggle').checked;
@@ -357,7 +403,7 @@ async function loadData() {
         unfilteredMeta.models = (unfilteredSummary.by_model||[]).map(m=>m.model);
         // Build stable color map from providers
         unfilteredMeta.providers.forEach(p => getProviderColor(p));
-        renderDashboard();
+        await renderDashboard();
     } catch(e) { showToast('Load failed: '+e.message,'error'); }
 }
 
@@ -381,14 +427,14 @@ async function loadFilteredData() {
         allData.summary=summary; allData.timeseries=timeseries; allData.calls=calls;
         allData.models=models; allData.tools=tools; allData.costDaily=costDaily; allData.costProjection=costProjection;
         allData.ratelimits=ratelimits;
-        renderDashboard();
+        await renderDashboard();
     } catch(e) { showToast('Filter failed: '+e.message,'error'); }
 }
 
-function renderDashboard() {
+async function renderDashboard() {
     populateFilters();
     renderBalance();
-    renderKPIs();
+    await renderKPIs();
     updateTsRangeLabels();
     renderCharts();
     renderRateLimits();
@@ -671,23 +717,81 @@ async function submitTopup(provider, btn) {
 // ============================================================================
 // KPIs
 // ============================================================================
-function renderKPIs() {
-    const s = allData.summary;
+let kpiRenderSeq = 0;
+
+async function fetchKpiSummaries() {
+    const fq = getFilterParams();
+    const currentParams = getKpiRangeParams();
+    const containing = getContainingKpiRangeInfo();
+    const currentReq = fetch(`/api/summary?_=1${fq}${currentParams}`).then(r => r.json());
+
+    if (!containing.supported) {
+        const currentSummary = await currentReq;
+        return { currentSummary, containingSummary:null, containing };
+    }
+
+    const containingReq = fetch(`/api/summary?_=1${fq}${containing.params}`).then(r => r.json());
+    const [currentSummary, containingSummary] = await Promise.all([currentReq, containingReq]);
+    return { currentSummary, containingSummary, containing };
+}
+
+async function renderKPIs() {
+    const renderSeq = ++kpiRenderSeq;
     const rangeLabel = getKpiRangeLabel();
-    document.getElementById('kpiCalls').textContent = s.total_calls.toLocaleString();
-    document.getElementById('kpiCallsMeta').textContent = `${s.session_count} sessions · ${rangeLabel}`;
-    document.getElementById('kpiCost').textContent = `$${s.total_cost.toFixed(2)}`;
-    document.getElementById('kpiCostMeta').textContent = s.total_calls > 0 ? `$${(s.total_cost/s.total_calls).toFixed(6)}/call` : '';
-    const ep = (s.error_rate*100).toFixed(2);
-    document.getElementById('kpiErrorRate').textContent = `${ep}%`;
-    const eb = ep > 5 ? 'error' : ep > 2 ? 'warn' : 'success';
-    document.getElementById('kpiErrorRateMeta').innerHTML = `<span class="badge ${eb}">${s.error_count} errors</span>`;
-    const models = allData.models.models;
-    const avgCH = models.length > 0 ? (models.reduce((s,m)=>s+m.avg_cache_hit_ratio,0)/models.length*100).toFixed(1) : '0.0';
-    document.getElementById('kpiCacheHit').textContent = `${avgCH}%`;
-    document.getElementById('kpiCacheHitMeta').textContent = `Avg across models · ${rangeLabel}`;
-    document.getElementById('kpiSessions').textContent = s.session_count.toLocaleString();
-    document.getElementById('kpiSessionsMeta').textContent = `${(s.total_calls/Math.max(s.session_count,1)).toFixed(1)} calls/session`;
+    const fallbackSummary = allData.summary || { total_calls:0, session_count:0, total_cost:0, error_rate:0, error_count:0 };
+
+    try {
+        const { currentSummary, containingSummary, containing } = await fetchKpiSummaries();
+        if (renderSeq !== kpiRenderSeq) return;
+
+        const s = currentSummary || fallbackSummary;
+        allData.summary = s;
+        document.getElementById('kpiCalls').textContent = s.total_calls.toLocaleString();
+        document.getElementById('kpiCallsMeta').textContent = `${s.session_count} sessions · ${rangeLabel}`;
+        document.getElementById('kpiCost').textContent = `$${s.total_cost.toFixed(2)}`;
+        document.getElementById('kpiCostMeta').textContent = s.total_calls > 0 ? `$${(s.total_cost/s.total_calls).toFixed(6)}/call` : '';
+        const ep = (s.error_rate*100).toFixed(2);
+        document.getElementById('kpiErrorRate').textContent = `${ep}%`;
+        const eb = ep > 5 ? 'error' : ep > 2 ? 'warn' : 'success';
+        document.getElementById('kpiErrorRateMeta').innerHTML = `<span class="badge ${eb}">${s.error_count} errors</span>`;
+        const models = allData.models.models;
+        const avgCH = models.length > 0 ? (models.reduce((sum,m)=>sum+m.avg_cache_hit_ratio,0)/models.length*100).toFixed(1) : '0.0';
+        document.getElementById('kpiCacheHit').textContent = `${avgCH}%`;
+        document.getElementById('kpiCacheHitMeta').textContent = `Avg across models · ${rangeLabel}`;
+        document.getElementById('kpiSessions').textContent = s.session_count.toLocaleString();
+        document.getElementById('kpiSessionsMeta').textContent = `${(s.total_calls/Math.max(s.session_count,1)).toFixed(1)} calls/session`;
+
+        const ofPeriodValue = document.getElementById('kpiOfPeriod');
+        const ofPeriodMeta = document.getElementById('kpiOfPeriodMeta');
+        if (!containing.supported) {
+            ofPeriodValue.textContent = '—';
+            ofPeriodMeta.textContent = '—';
+        } else {
+            const containingCost = containingSummary ? containingSummary.total_cost : 0;
+            const pct = containingCost > 0 ? (s.total_cost / containingCost) * 100 : 0;
+            ofPeriodValue.textContent = `${Math.round(pct)}%`;
+            ofPeriodMeta.textContent = containing.meta;
+        }
+    } catch {
+        if (renderSeq !== kpiRenderSeq) return;
+        const s = fallbackSummary;
+        document.getElementById('kpiCalls').textContent = s.total_calls.toLocaleString();
+        document.getElementById('kpiCallsMeta').textContent = `${s.session_count} sessions · ${rangeLabel}`;
+        document.getElementById('kpiCost').textContent = `$${s.total_cost.toFixed(2)}`;
+        document.getElementById('kpiCostMeta').textContent = s.total_calls > 0 ? `$${(s.total_cost/s.total_calls).toFixed(6)}/call` : '';
+        const ep = (s.error_rate*100).toFixed(2);
+        document.getElementById('kpiErrorRate').textContent = `${ep}%`;
+        const eb = ep > 5 ? 'error' : ep > 2 ? 'warn' : 'success';
+        document.getElementById('kpiErrorRateMeta').innerHTML = `<span class="badge ${eb}">${s.error_count} errors</span>`;
+        const models = allData.models.models;
+        const avgCH = models.length > 0 ? (models.reduce((sum,m)=>sum+m.avg_cache_hit_ratio,0)/models.length*100).toFixed(1) : '0.0';
+        document.getElementById('kpiCacheHit').textContent = `${avgCH}%`;
+        document.getElementById('kpiCacheHitMeta').textContent = `Avg across models · ${rangeLabel}`;
+        document.getElementById('kpiSessions').textContent = s.session_count.toLocaleString();
+        document.getElementById('kpiSessionsMeta').textContent = `${(s.total_calls/Math.max(s.session_count,1)).toFixed(1)} calls/session`;
+        document.getElementById('kpiOfPeriod').textContent = '—';
+        document.getElementById('kpiOfPeriodMeta').textContent = '—';
+    }
 }
 
 // ============================================================================
