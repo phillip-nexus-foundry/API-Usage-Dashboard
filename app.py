@@ -176,15 +176,26 @@ async def lifespan(_app: FastAPI):
     class SessionFileHandler(FileSystemEventHandler):
         def __init__(self):
             self._timer = None
+            self._last_scan_time = 0
+            self._min_scan_interval = 5.0  # Minimum 5 seconds between scans
 
         def _debounced_scan(self):
             """Debounce: wait 1s after last change before scanning."""
+            # Rate limit: don't scan too frequently
+            import time
+            now = time.time()
+            if now - self._last_scan_time < self._min_scan_interval:
+                logger.debug("Skipping scan - too soon since last scan")
+                return
+            
             if self._timer:
                 self._timer.cancel()
             self._timer = threading.Timer(1.0, self._do_scan)
             self._timer.start()
 
         def _do_scan(self):
+            import time
+            self._last_scan_time = time.time()
             logger.info("File change detected, rescanning...")
             reader.scan()
 
@@ -266,6 +277,29 @@ def _configured_models() -> List[str]:
     return sorted(model_costs.keys())
 
 
+async def _provider_cost_overrides() -> Dict[str, float]:
+    """
+    Canonical provider-level cumulative costs from balance checker.
+    Includes verified/adjusted reconciliations from config when present.
+    """
+    overrides: Dict[str, float] = {}
+    try:
+        balances = await balance_checker.check_balances(reader)
+        for prov, data in balances.items():
+            if not isinstance(data, dict):
+                continue
+            cumulative = data.get("cumulative_cost")
+            if cumulative is None:
+                continue
+            try:
+                overrides[prov] = float(cumulative)
+            except (TypeError, ValueError):
+                continue
+    except Exception as e:
+        logger.warning(f"Failed to load provider cost overrides: {e}")
+    return overrides
+
+
 # ============================================================================
 # ENDPOINTS
 # ============================================================================
@@ -289,6 +323,11 @@ async def summary(
     Supports optional provider/model filters and time range.
     """
     _reload_config_from_disk()
+    # Treat empty query params as unset so all-time override logic still applies.
+    if provider == "":
+        provider = None
+    if model == "":
+        model = None
     where, params = _build_filter(provider, model)
     if start:
         where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
@@ -353,6 +392,26 @@ async def summary(
             for mdl in configured_models:
                 model_map.setdefault(mdl, {"model": mdl, "calls": 0, "cost": 0.0, "tokens": 0})
         by_model = sorted(model_map.values(), key=lambda x: (-x["calls"], x["model"]))
+
+        # All-time summaries should respect provider reconciliations
+        # (verified usage overrides / adjustments) when model isn't filtered.
+        if start is None and end is None and model is None:
+            overrides = await _provider_cost_overrides()
+            if overrides:
+                # Apply override to already-present providers.
+                for entry in by_provider:
+                    prov = entry["provider"]
+                    if prov in overrides:
+                        entry["cost"] = round(overrides[prov], 6)
+                # Include configured providers that may not have DB rows yet.
+                existing = {entry["provider"] for entry in by_provider}
+                for prov, cost in overrides.items():
+                    if prov not in existing:
+                        by_provider.append(
+                            {"provider": prov, "calls": 0, "cost": round(cost, 6), "tokens": 0}
+                        )
+                by_provider = sorted(by_provider, key=lambda x: (-x["calls"], x["provider"]))
+                total_cost = sum(entry["cost"] for entry in by_provider)
 
     return {
         "timestamp": _utc_now().isoformat().replace("+00:00", "Z"),

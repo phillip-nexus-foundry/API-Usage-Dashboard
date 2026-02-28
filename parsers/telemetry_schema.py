@@ -115,17 +115,47 @@ MODEL_COSTS = {
         "cache_read": 0.0,
         "cache_write": 0.0,
     },
+    # MiniMax models (USD pricing from platform.minimax.io)
+    "MiniMax-M2.5": {
+        "input": 0.30,
+        "output": 1.20,
+        "cache_read": 0.03,
+        "cache_write": 0.375,
+    },
 }
 
 
 # Moonshot web operation surcharge (per call)
 WEB_TOOL_SURCHARGE = 0.01
 WEB_TOOL_NAMES = {"web_search", "web_fetch", "browser"}
+# Bump whenever pricing semantics or canonicalization rules change.
+COST_LOGIC_VERSION = "2026-02-28-moonshot-web-per-call-v1"
 
 
 def is_anthropic_model(model: str) -> bool:
     """Best-effort model classifier for Anthropic Claude model IDs."""
     return model.startswith("claude")
+
+
+def canonicalize_model_for_cost(model: str) -> str:
+    """
+    Normalize common model aliases/snapshots to canonical pricing keys.
+    Keeps existing exact keys unchanged.
+    """
+    if model in MODEL_COSTS:
+        return model
+
+    m = (model or "").strip()
+    lower = m.lower()
+
+    if lower.startswith("kimi-k2.5"):
+        return "kimi-k2.5"
+    if lower.startswith("moonshot-v1-8k"):
+        return "moonshot-v1-8k"
+    if lower.startswith("minimax-m2.5"):
+        return "MiniMax-M2.5"
+
+    return m
 
 
 def anthropic_billable_cache_write_delta(previous_highwater: Optional[int], current_raw: int) -> int:
@@ -158,7 +188,8 @@ def compute_cost_breakdown(
     For Anthropic telemetry this may differ from raw cacheWrite if the source value
     is cumulative.
     """
-    costs = MODEL_COSTS.get(model, {
+    canonical_model = canonicalize_model_for_cost(model)
+    costs = MODEL_COSTS.get(canonical_model, {
         "input": 0.0,
         "output": 0.0,
         "cache_read": 0.0,
@@ -172,7 +203,8 @@ def compute_cost_breakdown(
 
     web_surcharge_count = 0
     if tool_names:
-        web_surcharge_count = sum(1 for t in tool_names if t in WEB_TOOL_NAMES)
+        # Moonshot web pricing is charged once per API call when any web tool is used.
+        web_surcharge_count = 1 if any(t in WEB_TOOL_NAMES for t in tool_names) else 0
     cost_web_surcharge = web_surcharge_count * WEB_TOOL_SURCHARGE
 
     total = cost_input + cost_output + cost_cache_read + cost_cache_write + cost_web_surcharge

@@ -11,11 +11,10 @@ balance:
     - date: '2026-02-27'
       amount: 30.0
       note: Tier 2 top up
-    verified_usage_cost: 25.35
-    verified_usage_note: "Calibrated Feb 27 2026 9:39 AM PST against Claude site ($24.65\
-      \ remaining of $50). Historical session files purged by OpenClaw \xE2\u20AC\u201D\
-      \ computed cost underreports due to missing data. Going-forward pricing is correct\
-      \ (Opus 4.6 rates fixed)."
+    verified_usage_cost: 33.8
+    verified_usage_note: Calibrated Feb 27 2026 against Claude site (USD 16.20 remaining
+      of USD 50; USD 33.80 used). Historical session files purged by OpenClaw, so
+      computed DB cost underreports and verified override is authoritative.
     warn_threshold: 5.0
     critical_threshold: 2.0
   minimax:
@@ -23,6 +22,10 @@ balance:
     - date: '2026-02-27'
       amount: 25.0
       note: Initial Deposit
+    verified_usage_cost: 2.85
+    verified_usage_note: Recalibrated Feb 27 2026 to match provider balance ($22.15
+      remaining; no new deposit, so cumulative usage is $2.85). This verified value
+      is authoritative for balance tracking.
     warn_threshold: 5.0
     critical_threshold: 2.0
   moonshot:
@@ -85,6 +88,11 @@ model_costs:
     output: 1.25
     cache_read: 0.03
     cache_write: 0.3
+  MiniMax-M2.5:
+    input: 0.3
+    output: 1.2
+    cache_read: 0.03
+    cache_write: 0.375
   kimi-k2.5:
     input: 0.6
     output: 3.0

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>API Usage Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=10">
+    <link rel="stylesheet" href="/static/style.css?v=12">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
@@ -77,25 +77,13 @@
                 </label>
             </div>
         </div>
-        <div class="grid">
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Calls</div><div class="card-value" id="kpiCalls">—</div><div class="card-meta" id="kpiCallsMeta"></div></div>
-            </div>
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Cost</div><div class="card-value" id="kpiCost">—</div><div class="card-meta" id="kpiCostMeta"></div></div>
-            </div>
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Error Rate</div><div class="card-value" id="kpiErrorRate">—</div><div class="card-meta" id="kpiErrorRateMeta"></div></div>
-            </div>
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Cache Hit %</div><div class="card-value" id="kpiCacheHit">—</div><div class="card-meta" id="kpiCacheHitMeta"></div></div>
-            </div>
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Sessions</div><div class="card-value" id="kpiSessions">—</div><div class="card-meta" id="kpiSessionsMeta"></div></div>
-            </div>
-            <div class="grid-item" style="grid-column: span 1;">
-                <div class="card"><div class="card-title">Of Period</div><div class="card-value" id="kpiOfPeriod">—</div><div class="card-meta" id="kpiOfPeriodMeta"></div></div>
-            </div>
+        <div class="grid-kpi">
+            <div class="card"><div class="card-title">Calls</div><div class="card-value" id="kpiCalls">—</div><div class="card-meta" id="kpiCallsMeta"></div></div>
+            <div class="card"><div class="card-title">Cost</div><div class="card-value" id="kpiCost">—</div><div class="card-meta" id="kpiCostMeta"></div></div>
+            <div class="card"><div class="card-title">Error Rate</div><div class="card-value" id="kpiErrorRate">—</div><div class="card-meta" id="kpiErrorRateMeta"></div></div>
+            <div class="card"><div class="card-title">Cache Hit %</div><div class="card-value" id="kpiCacheHit">—</div><div class="card-meta" id="kpiCacheHitMeta"></div></div>
+            <div class="card"><div class="card-title">Sessions</div><div class="card-value" id="kpiSessions">—</div><div class="card-meta" id="kpiSessionsMeta"></div></div>
+            <div class="card"><div class="card-title">Of Period</div><div class="card-value" id="kpiOfPeriod">—</div><div class="card-meta" id="kpiOfPeriodMeta"></div></div>
         </div>
 
         <!-- Row 2: Time Series with range controls -->
@@ -249,6 +237,6 @@
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
-    <script src="/static/dashboard.js?v=10"></script>
+    <script src="/static/dashboard.js?v=11"></script>
 </body>
 </html>

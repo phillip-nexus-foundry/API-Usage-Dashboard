@@ -55,6 +55,13 @@ a:hover {
     margin-bottom: 12px;
 }
 
+.grid-kpi {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
 .grid-item {
     grid-column: span 1;
 }
@@ -1041,6 +1048,10 @@ th.sorted-desc::after {
     
     .btn {
         width: 100%;
+    }
+    
+    .grid-kpi {
+        grid-template-columns: 1fr;
     }
     
     .card-value {

@@ -16,6 +16,8 @@ from .telemetry_schema import (
     compute_cost_breakdown,
     is_anthropic_model,
     anthropic_billable_cache_write_delta,
+    canonicalize_model_for_cost,
+    COST_LOGIC_VERSION,
 )
 
 
@@ -87,6 +89,10 @@ class OpenClawReader:
                     is_error INTEGER NOT NULL
                 )
             """)
+            cursor.execute("PRAGMA table_info(records)")
+            record_cols = {row[1] for row in cursor.fetchall()}
+            if "source_file" not in record_cols:
+                cursor.execute("ALTER TABLE records ADD COLUMN source_file TEXT")
             
             # Create indexes
             cursor.execute("""CREATE INDEX IF NOT EXISTS idx_session_id ON records(session_id)""")
@@ -102,6 +108,10 @@ class OpenClawReader:
                     record_count INTEGER NOT NULL
                 )
             """)
+            cursor.execute("PRAGMA table_info(file_index)")
+            index_cols = {row[1] for row in cursor.fetchall()}
+            if "parser_version" not in index_cols:
+                cursor.execute("ALTER TABLE file_index ADD COLUMN parser_version TEXT")
             
             conn.commit()
     
@@ -133,7 +143,7 @@ class OpenClawReader:
             # Delete records for files that no longer exist
             for old_file in tracked_files - set(current_files.keys()):
                 logger.info(f"Deleting records for removed file: {old_file}")
-                cursor.execute("DELETE FROM records WHERE call_id IN (SELECT call_id FROM records WHERE call_id LIKE ?)", (f"{old_file}%",))
+                cursor.execute("DELETE FROM records WHERE source_file = ?", (old_file,))
                 cursor.execute("DELETE FROM file_index WHERE filepath = ?", (old_file,))
             
             # Process current files
@@ -142,16 +152,23 @@ class OpenClawReader:
                     mtime = filepath.stat().st_mtime
                     
                     # Check if file was modified since last scan
-                    cursor.execute("SELECT mtime, record_count FROM file_index WHERE filepath = ?", (filepath_str,))
+                    cursor.execute(
+                        "SELECT mtime, record_count, parser_version FROM file_index WHERE filepath = ?",
+                        (filepath_str,),
+                    )
                     existing = cursor.fetchone()
                     
                     if existing and existing[0] == mtime:
-                        # File unchanged, skip
-                        continue
+                        # File unchanged AND parser logic unchanged, skip
+                        if len(existing) >= 3 and existing[2] == COST_LOGIC_VERSION:
+                            continue
                     
                     # File is new or modified, re-parse
                     logger.info(f"Parsing {filepath}")
                     records = self._parse_file(filepath)
+
+                    # Remove prior rows from this source file so removed lines do not linger.
+                    cursor.execute("DELETE FROM records WHERE source_file = ?", (filepath_str,))
                     
                     # Records use INSERT OR REPLACE with call_id as PRIMARY KEY,
                     # so re-parsing a file naturally updates existing records.
@@ -160,18 +177,23 @@ class OpenClawReader:
                     
                     # Insert new records
                     for record in records:
-                        self._insert_record(cursor, record)
+                        self._insert_record(cursor, record, filepath_str)
                     
                     # Update file_index
                     cursor.execute(
-                        "INSERT OR REPLACE INTO file_index (filepath, mtime, record_count) VALUES (?, ?, ?)",
-                        (filepath_str, mtime, len(records))
+                        "INSERT OR REPLACE INTO file_index (filepath, mtime, record_count, parser_version) VALUES (?, ?, ?, ?)",
+                        (filepath_str, mtime, len(records), COST_LOGIC_VERSION)
                     )
                     
                 except Exception as e:
                     logger.error(f"Failed to process file {filepath}: {e}")
                     error = ParseError(str(filepath), 0, str(e))
                     self.parse_errors.append(error)
+
+            # Cleanup legacy rows inserted before source_file tracking.
+            # After parser_version invalidation runs once, valid rows are reinserted
+            # with source_file populated, so NULL rows are stale/orphaned.
+            cursor.execute("DELETE FROM records WHERE source_file IS NULL")
             
             conn.commit()
     
@@ -255,7 +277,8 @@ class OpenClawReader:
             has_tool_calls = any(c.get("type") == "toolCall" for c in content)
             tool_names = [c.get("name", "") for c in content if c.get("type") == "toolCall"]
 
-            model = message.get("model", "unknown")
+            raw_model = message.get("model", "unknown")
+            model = canonicalize_model_for_cost(raw_model)
             session_key = session_id or "unknown"
             billable_cache_write = tokens_cache_write
 
@@ -339,11 +362,17 @@ class OpenClawReader:
             logger.error(f"Failed to convert message to record: {e}")
             return None
     
-    def _insert_record(self, cursor: sqlite3.Cursor, record: TelemetryRecord):
+    def _insert_record(self, cursor: sqlite3.Cursor, record: TelemetryRecord, source_file: str):
         """Insert a TelemetryRecord into the database."""
         cursor.execute("""
-            INSERT OR REPLACE INTO records VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            INSERT OR REPLACE INTO records (
+                call_id, session_id, parent_id, timestamp, timestamp_iso, api, provider, model,
+                stop_reason, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write,
+                tokens_total, cache_hit_ratio, cost_input, cost_output, cost_cache_read,
+                cost_cache_write, cost_total, has_thinking, has_tool_calls, tool_names,
+                content_length, is_error, source_file
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
         """, (
             record.call_id,
@@ -371,6 +400,7 @@ class OpenClawReader:
             json.dumps(record.tool_names),
             record.content_length,
             int(record.is_error),
+            source_file,
         ))
     
     def get_records(self, filters: Optional[Dict[str, Any]] = None) -> List[TelemetryRecord]:
