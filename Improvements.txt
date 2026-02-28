@@ -1,0 +1,9 @@
+Selecting more log entries per page does not show the entries from the current entry, it goes back to some time in the past and starts from there and show like, the last x number or something. Only does this for the 100 and 500 entries options.
+
+The time frame dropdown does not always display what it is set to in the Metrics section, especially after server restart (it is blank even though it is showing "All Time".
+
+Call logs do not always appear to be sorted by newest at the top to oldest.
+
+Every time the site refreshes automatically, while browsing the call logs, it resets to the front page even though I still am on other pages. No wonder I can't see the API calls from other providers I was checking for! But actually... I'm having trouble even finding any of the MiniMax call logs from yesterday.
+
+In the spend limits section, the Moonshot spend limit is labeled and has a matching blue dot, but Anthropic is not labeled and does not show a matching green dot. If I am in the red for reaching any spend limit, daily or monthly, I should see a warning at the very top of the site page in the corresponding Balance Tracker card for that provider that indicates what spend rate limits are being reached and at what percent they are, and estimates how much longer in hours and minutes it will be until they are completely reached based on the average use rate. There should be some room just to the right of the dollar balance remaining on the right half of each card just below the drop down arrow or status indicator.

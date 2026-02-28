@@ -2,6 +2,7 @@ server:
   host: 127.0.0.1
   port: 8050
 sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
+claude_code_tier: pro
 balance:
   anthropic:
     ledger:
@@ -23,9 +24,9 @@ balance:
       amount: 25.0
       note: Initial Deposit
     verified_usage_cost: 2.85
-    verified_usage_note: Recalibrated Feb 27 2026 to match provider balance ($22.15
-      remaining; no new deposit, so cumulative usage is $2.85). This verified value
-      is authoritative for balance tracking.
+    verified_usage_note: Recalibrated Feb 27 2026 to match provider balance (.15 remaining;
+      no new deposit, so cumulative usage is .85). This verified value is authoritative
+      for balance tracking.
     warn_threshold: 5.0
     critical_threshold: 2.0
   moonshot:

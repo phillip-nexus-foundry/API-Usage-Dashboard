@@ -112,6 +112,57 @@ class OpenClawReader:
             index_cols = {row[1] for row in cursor.fetchall()}
             if "parser_version" not in index_cols:
                 cursor.execute("ALTER TABLE file_index ADD COLUMN parser_version TEXT")
+
+            # resource_snapshots table: provider balance/rate-limit snapshots
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS resource_snapshots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    snapshot_type TEXT NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    balance_amount REAL,
+                    balance_currency TEXT,
+                    balance_source TEXT,
+                    tier TEXT,
+                    rpm_limit INTEGER,
+                    rpm_used INTEGER,
+                    rpm_remaining INTEGER,
+                    computed_cost REAL,
+                    drift_amount REAL,
+                    drift_percentage REAL,
+                    raw_response TEXT
+                )
+            """)
+            cursor.execute("PRAGMA table_info(resource_snapshots)")
+            snapshot_cols = {row[1] for row in cursor.fetchall()}
+            snapshot_column_defs = {
+                "provider": "TEXT NOT NULL DEFAULT ''",
+                "snapshot_type": "TEXT NOT NULL DEFAULT ''",
+                "timestamp": "INTEGER NOT NULL DEFAULT 0",
+                "balance_amount": "REAL",
+                "balance_currency": "TEXT",
+                "balance_source": "TEXT",
+                "tier": "TEXT",
+                "rpm_limit": "INTEGER",
+                "rpm_used": "INTEGER",
+                "rpm_remaining": "INTEGER",
+                "computed_cost": "REAL",
+                "drift_amount": "REAL",
+                "drift_percentage": "REAL",
+                "raw_response": "TEXT",
+            }
+            for col, ddl in snapshot_column_defs.items():
+                if col not in snapshot_cols:
+                    cursor.execute(f"ALTER TABLE resource_snapshots ADD COLUMN {col} {ddl}")
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_snapshots_provider_time
+                ON resource_snapshots(provider, timestamp)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_resource_snapshots_type_time
+                ON resource_snapshots(snapshot_type, timestamp)
+            """)
             
             conn.commit()
     

@@ -1,0 +1,5 @@
+[+] ---- Run requested ----
+[+] Checking for existing listener on port 8050.
+[+] Starting app.py with pythonw.exe in background.
+[+] Started server process. PID=1064.
+[+] Server is listening on port 8050. Startup successful.

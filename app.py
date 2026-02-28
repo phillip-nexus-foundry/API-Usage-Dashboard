@@ -1002,12 +1002,32 @@ async def balance():
     return balances
 
 
+def _get_claude_code_tier_display() -> str:
+    """Get Claude Code tier display name from env var or config."""
+    # Check env var first (CLAUDE_CODE_TIER=pro|max_100|max_200)
+    tier = os.environ.get('CLAUDE_CODE_TIER', '').lower().strip()
+    if not tier:
+        # Fall back to config
+        tier = CONFIG.get('claude_code_tier', 'pro').lower().strip()
+    
+    tier_map = {
+        'pro': 'Claude Code Pro ($20/mo)',
+        'max_100': 'Claude Code Max ($100/mo)',
+        'max_200': 'Claude Code Max ($200/mo)',
+    }
+    return tier_map.get(tier, 'Claude Code Pro ($20/mo)')
+
 @app.get("/api/resources")
 async def resources():
     """Resource availability cards with 5-hour and 1-week usage windows."""
+    _reload_config_from_disk()
+    # Balance-based providers are excluded from Resource Availability.
+    # This section only shows providers with RPM/TPM rate limits (window-based).
+    # MiniMax and Moonshot are pay-per-use balance providers, not rate-limited resources.
+    _BALANCE_ONLY_PROVIDERS = {"minimax", "moonshot"}
     provider_defs = {
         "anthropic": {
-            "display_name": "Claude Code (Pro / Max)",
+            "display_name": _get_claude_code_tier_display(),
             "usage_provider_aliases": ["anthropic"],
             "window_limits": {"five_hour": 3.00, "one_week": 20.00},
             "unit": "usd",
@@ -1117,6 +1137,8 @@ async def resources():
             "error": snapshot.get("error") if snapshot else None,
         }
 
+    # Enforce exclusion of balance-only providers (e.g. minimax, moonshot)
+    response_providers = {k: v for k, v in response_providers.items() if k not in _BALANCE_ONLY_PROVIDERS}
     return {"providers": response_providers}
 
 
