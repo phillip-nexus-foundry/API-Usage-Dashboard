@@ -35,7 +35,7 @@ function loadState(key, fallback) {
 }
 function saveState(key, value) { localStorage.setItem('dash_'+key, JSON.stringify(value)); }
 
-let currentSort = loadState('sort', { field:null, order:'desc' });
+let currentSort = loadState('sort', { field:'timestamp', order:'desc' });
 let currentPage = loadState('page', 1);
 let callsPerPage = loadState('perPage', 50);
 let useUTC = loadState('useUTC', false);
@@ -408,7 +408,7 @@ async function loadData() {
             fetch(`/api/summary?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/summary?_=1').then(r=>r.json()),  // unfiltered for earliest timestamp
             fetch(`/api/timeseries?interval=${interval}${tsRange}`).then(r=>r.json()),
-            fetch(`/api/calls?page=1&per_page=${callsPerPage}${kpiRange}`).then(r=>r.json()),
+            fetch(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/models?_=1${kpiRange}`).then(r=>r.json()),
             fetch(`/api/tools?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/balance').then(r=>r.json()),
@@ -1791,3 +1791,4 @@ function showToast(message, type='info') {
     c.appendChild(t);
     setTimeout(() => t.remove(), 5000);
 }
+
