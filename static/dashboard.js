@@ -22,7 +22,7 @@ function getProviderColor(provider) {
     return providerColorMap[provider];
 }
 
-let allData = { summary:null, timeseries:null, calls:null, models:null, tools:null, balance:null, evals:null, costDaily:null, costProjection:null, ratelimits:null, spendlimits:null };
+let allData = { summary:null, timeseries:null, calls:null, models:null, tools:null, balance:null, resources:null, evals:null, costDaily:null, costProjection:null, ratelimits:null, spendlimits:null };
 let unfilteredMeta = { providers:[], models:[] };
 let chartInstances = {};
 
@@ -256,6 +256,27 @@ function setupEventListeners() {
             renderCallLog();
         });
     });
+    document.getElementById('pollResourcesBtn').addEventListener('click', async () => {
+        const btn = document.getElementById('pollResourcesBtn');
+        btn.disabled = true;
+        btn.textContent = 'Polling...';
+        try {
+            const resp = await fetch('/api/resources/poll', { method: 'POST' });
+            const data = await resp.json();
+            if (data.error) {
+                showToast(data.error, 'error');
+            } else {
+                allData.resources = { providers: data.providers || {} };
+                renderResources();
+                showToast('Resource poll complete', 'success');
+            }
+        } catch (e) {
+            showToast('Poll failed: ' + e.message, 'error');
+        } finally {
+            btn.disabled = false;
+            btn.textContent = 'Poll Now';
+        }
+    });
     setupRateLimitListeners();
     setupSpendLimitListeners();
 }
@@ -383,7 +404,7 @@ async function loadData() {
         const interval = document.getElementById('filterInterval').value;
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
-        const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,evals,costDaily,costProjection,ratelimits,spendlimits] = await Promise.all([
+        const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits] = await Promise.all([
             fetch(`/api/summary?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/summary?_=1').then(r=>r.json()),  // unfiltered for earliest timestamp
             fetch(`/api/timeseries?interval=${interval}${tsRange}`).then(r=>r.json()),
@@ -391,13 +412,14 @@ async function loadData() {
             fetch(`/api/models?_=1${kpiRange}`).then(r=>r.json()),
             fetch(`/api/tools?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/balance').then(r=>r.json()),
+            fetch('/api/resources').then(r=>r.json()),
             fetch('/api/evals').then(r=>r.json()),
             fetch(`/api/cost/daily?_=1${kpiRange}`).then(r=>r.json()),
             fetch(`/api/cost/projection?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/ratelimits').then(r=>r.json()),
             fetch('/api/spendlimits').then(r=>r.json()),
         ]);
-        allData = {summary,timeseries,calls,models,tools,balance,evals,costDaily,costProjection,ratelimits,spendlimits};
+        allData = {summary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits};
         absoluteEarliest = unfilteredSummary.earliest_timestamp || 0;
         unfilteredMeta.providers = (unfilteredSummary.by_provider||[]).map(p=>p.provider);
         unfilteredMeta.models = (unfilteredSummary.by_model||[]).map(m=>m.model);
@@ -434,12 +456,82 @@ async function loadFilteredData() {
 async function renderDashboard() {
     populateFilters();
     renderBalance();
+    renderResources();
     await renderKPIs();
     updateTsRangeLabels();
     renderCharts();
     renderRateLimits();
     renderSpendLimits();
     renderCallLog();
+}
+
+function renderResources() {
+    const data = allData.resources;
+    const container = document.getElementById('resourceAvailability');
+    if (!container || !data || !data.providers) return;
+    const providers = Object.values(data.providers);
+    container.innerHTML = '';
+
+    if (providers.length === 0) {
+        container.innerHTML = '<div class="text-muted">No resource snapshots yet.</div>';
+        return;
+    }
+
+    const order = ['elevenlabs', 'anthropic', 'codex_cli'];
+    providers.sort((a, b) => order.indexOf(a.provider) - order.indexOf(b.provider));
+
+    const formatExtraUsage = (item) => {
+        const extra = item.extra_usage || {};
+        const value = Number(extra.value || 0);
+        if (extra.unit === 'usd') {
+            const fixed = value.toFixed(2);
+            const clipped = fixed.startsWith('0') ? fixed.slice(1) : fixed;
+            return `$${clipped}`;
+        }
+        return `${Math.round(value).toLocaleString()} credits`;
+    };
+
+    for (const item of providers) {
+        const w5h = item.windows?.five_hour || { used: 0, limit: 0, percent: 0 };
+        const w1w = item.windows?.one_week || { used: 0, limit: 0, percent: 0 };
+        const p5h = Math.max(0, Math.min(100, Number(w5h.percent || 0)));
+        const p1w = Math.max(0, Math.min(100, Number(w1w.percent || 0)));
+        const age = item.age_seconds !== null && item.age_seconds !== undefined ? `${Math.floor(item.age_seconds / 60)}m ago` : 'n/a';
+        const error = item.error ? `<div class="resource-error">${item.error}</div>` : '';
+        const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
+        const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
+
+        const card = document.createElement('div');
+        card.className = 'resource-item';
+        card.innerHTML = `
+            <div class="resource-title">
+                <span class="provider-dot" style="background:${getProviderColor(item.provider)}"></span>
+                <span>${item.display_name || item.provider}</span>
+            </div>
+            <div class="resource-meter">
+                <div class="resource-meter-head">
+                    <span>5 hr</span>
+                    <span>${p5h.toFixed(1)}%</span>
+                </div>
+                <div class="resource-meter-track">
+                    <div class="resource-meter-fill status-${statusClass5h}" style="width:${p5h}%"></div>
+                </div>
+            </div>
+            <div class="resource-meter">
+                <div class="resource-meter-head">
+                    <span>1 wk</span>
+                    <span>${p1w.toFixed(1)}%</span>
+                </div>
+                <div class="resource-meter-track">
+                    <div class="resource-meter-fill status-${statusClass1w}" style="width:${p1w}%"></div>
+                </div>
+            </div>
+            <div class="resource-extra">${formatExtraUsage(item)}</div>
+            <div class="resource-meta">Updated ${age}</div>
+            ${error}
+        `;
+        container.appendChild(card);
+    }
 }
 
 function populateFilters() {
@@ -1699,4 +1791,3 @@ function showToast(message, type='info') {
     c.appendChild(t);
     setTimeout(() => t.remove(), 5000);
 }
-

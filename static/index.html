@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>API Usage Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=12">
+    <link rel="stylesheet" href="/static/style.css?v=14">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
@@ -58,6 +58,15 @@
                 </div>
             </div>
             <div id="balanceTracker" class="balance-tracker"></div>
+        </div>
+
+        <!-- Row 0b: Resource Availability -->
+        <div class="card resource-card" style="margin-top: 12px;">
+            <div class="rate-limit-header">
+                <span class="card-title" style="margin-bottom:0">Resource Availability</span>
+                <button class="btn" id="pollResourcesBtn" style="font-size:11px;padding:3px 10px;">Poll Now</button>
+            </div>
+            <div id="resourceAvailability" class="resource-grid"></div>
         </div>
 
         <!-- Row 1: KPI Cards -->
@@ -237,6 +246,6 @@
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
-    <script src="/static/dashboard.js?v=11"></script>
+    <script src="/static/dashboard.js?v=13"></script>
 </body>
 </html>

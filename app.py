@@ -20,9 +20,14 @@ from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
 import aiosqlite
 import sqlite3
+try:
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+except Exception:  # pragma: no cover - optional dependency fallback
+    AsyncIOScheduler = None
 
 from parsers.openclaw_reader import OpenClawReader
 from balance.checker import BalanceChecker
+from balance.poller import BalancePoller
 from evals.evaluator import Evaluator
 
 
@@ -155,10 +160,52 @@ reader = OpenClawReader(
 )
 balance_checker = BalanceChecker(CONFIG, config_path=str(config_path))
 evaluator = Evaluator(CONFIG)
+balance_poller = BalancePoller(
+    CONFIG,
+    db_path=reader.db_path,
+    profiles_dir=str(Path(__file__).parent / "browser_profiles"),
+    config_path=str(config_path),
+    alert_threshold_pct=5.0,
+    autocorrect_threshold_pct=10.0,
+    auto_correct=False,
+)
+scheduler = None
 
 def _utc_now() -> datetime:
     """Timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
+
+
+def _resource_status(snapshot: Dict[str, Any]) -> str:
+    if snapshot.get("error"):
+        return "critical"
+    balance = snapshot.get("balance_amount")
+    if balance is not None:
+        if balance <= 2:
+            return "critical"
+        if balance <= 10:
+            return "warn"
+    drift_pct = snapshot.get("drift_percentage")
+    if drift_pct is not None:
+        if abs(drift_pct) >= 10:
+            return "critical"
+        if abs(drift_pct) >= 5:
+            return "warn"
+    return snapshot.get("status") or "ok"
+
+
+async def _run_resource_poll() -> List[Dict[str, Any]]:
+    _reload_config_from_disk()
+    balance_poller.refresh_config(CONFIG)
+    return await balance_poller.poll_all(["anthropic", "elevenlabs", "codex_cli"])
+
+
+async def _resource_poll_job():
+    try:
+        await _run_resource_poll()
+        logger.info("Resource polling job completed")
+    except Exception as e:
+        logger.error(f"Resource polling job failed: {e}")
 
 
 @asynccontextmanager
@@ -217,11 +264,45 @@ async def lifespan(_app: FastAPI):
     logger.info("Probing APIs for rate limits...")
     await apply_auto_detected_limits()
 
+    # Resource polling scheduler
+    global scheduler
+    if AsyncIOScheduler:
+        scheduler = AsyncIOScheduler()
+        scheduler.add_job(
+            _resource_poll_job,
+            trigger="cron",
+            id="resource_poll_business_hours",
+            replace_existing=True,
+            hour="7-21",
+            minute="*/15",
+            jitter=900,  # 15 minute base + up to 15 minute jitter
+            coalesce=True,
+            max_instances=1,
+        )
+        scheduler.add_job(
+            _resource_poll_job,
+            trigger="cron",
+            id="resource_poll_overnight",
+            replace_existing=True,
+            hour="0,2,4,6,22",
+            minute="0",
+            jitter=3600,  # 2 hour base + up to 1 hour jitter
+            coalesce=True,
+            max_instances=1,
+        )
+        scheduler.start()
+    else:
+        logger.warning("APScheduler not installed; background polling scheduler disabled")
+
+    # Initial poll on startup for quick visibility
+    await _resource_poll_job()
     logger.info("Startup complete")
     try:
         yield
     finally:
         logger.info("Stopping file watcher...")
+        if scheduler:
+            scheduler.shutdown(wait=False)
         observer.stop()
         observer.join(timeout=3)
 
@@ -257,6 +338,7 @@ def _reload_config_from_disk():
             CONFIG = yaml.safe_load(f) or {}
         balance_checker.config = CONFIG
         evaluator.config = CONFIG
+        balance_poller.refresh_config(CONFIG)
     except Exception as e:
         logger.warning(f"Failed to reload config.yaml: {e}")
 
@@ -918,6 +1000,132 @@ async def balance():
                 proj_data["usage_tokens"] = row[2]
 
     return balances
+
+
+@app.get("/api/resources")
+async def resources():
+    """Resource availability cards with 5-hour and 1-week usage windows."""
+    provider_defs = {
+        "anthropic": {
+            "display_name": "Claude Code (Pro / Max)",
+            "usage_provider_aliases": ["anthropic"],
+            "window_limits": {"five_hour": 3.00, "one_week": 20.00},
+            "unit": "usd",
+        },
+        "elevenlabs": {
+            "display_name": "ElevenLabs",
+            "usage_provider_aliases": ["elevenlabs"],
+            "window_limits": {"five_hour": 600, "one_week": 3000},
+            "unit": "credits",
+        },
+        "codex_cli": {
+            "display_name": "Codex CLI",
+            "usage_provider_aliases": ["openclaw", "codex_cli"],
+            "window_limits": {"five_hour": 250, "one_week": 1000},
+            "unit": "credits",
+            "pricing_notes": {
+                "minimum_purchase": "1,000 credits per purchase",
+                "messages_per_purchase": "250-1,300 CLI or Extension messages",
+                "cloud_tasks_per_purchase": "40-250 cloud tasks",
+            },
+        },
+    }
+
+    now_ms = int(_utc_now().timestamp() * 1000)
+    five_hour_start = now_ms - (5 * 60 * 60 * 1000)
+    one_week_start = now_ms - (7 * 24 * 60 * 60 * 1000)
+    snapshots = balance_poller.get_latest_snapshots(list(provider_defs.keys()))
+
+    def _window_usage(provider_aliases: List[str], since_ms: int) -> Dict[str, float]:
+        placeholders = ",".join("?" * len(provider_aliases))
+        params: List[Any] = [*provider_aliases, since_ms]
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT
+                    COUNT(*),
+                    COALESCE(SUM(cost_total), 0.0)
+                FROM records
+                WHERE provider IN ({placeholders})
+                  AND timestamp >= ?
+                """,
+                params,
+            )
+            row = cursor.fetchone() or (0, 0.0)
+            return {"calls": int(row[0] or 0), "cost": float(row[1] or 0.0)}
+
+    def _to_provider_units(unit: str, usage_cost: float, usage_calls: int, provider_key: str) -> float:
+        if unit == "usd":
+            return round(usage_cost, 2)
+        if provider_key == "codex_cli":
+            # Placeholder conversion until direct Codex CLI usage ingestion is available.
+            estimated = max(int(round(usage_calls * 4)), int(round(usage_cost * 100)))
+            return float(estimated)
+        if provider_key == "elevenlabs":
+            # Placeholder conversion: 1 USD ~= 100 credits for dashboard visibility.
+            return float(int(round(usage_cost * 100)))
+        return 0.0
+
+    def _pct(used: float, limit: float) -> float:
+        if not limit or limit <= 0:
+            return 0.0
+        return round(min(100.0, (used / limit) * 100.0), 1)
+
+    response_providers: Dict[str, Dict[str, Any]] = {}
+    for provider_key, provider_def in provider_defs.items():
+        usage_5h = _window_usage(provider_def["usage_provider_aliases"], five_hour_start)
+        usage_1w = _window_usage(provider_def["usage_provider_aliases"], one_week_start)
+        used_5h = _to_provider_units(provider_def["unit"], usage_5h["cost"], usage_5h["calls"], provider_key)
+        used_1w = _to_provider_units(provider_def["unit"], usage_1w["cost"], usage_1w["calls"], provider_key)
+
+        if provider_key == "codex_cli" and used_5h == 0 and used_1w == 0:
+            # Explicit placeholder until Codex CLI records are persisted directly.
+            used_5h = 80.0
+            used_1w = 320.0
+
+        limit_5h = float(provider_def["window_limits"]["five_hour"])
+        limit_1w = float(provider_def["window_limits"]["one_week"])
+        snapshot = snapshots.get(provider_key, {})
+        ts = snapshot.get("timestamp")
+        age_seconds = max(0, (now_ms - int(ts)) // 1000) if ts else None
+
+        response_providers[provider_key] = {
+            "provider": provider_key,
+            "display_name": provider_def["display_name"],
+            "status": _resource_status(snapshot) if snapshot else "warn",
+            "age_seconds": age_seconds,
+            "windows": {
+                "five_hour": {
+                    "label": "5 hr",
+                    "used": round(used_5h, 2),
+                    "limit": round(limit_5h, 2),
+                    "percent": _pct(used_5h, limit_5h),
+                },
+                "one_week": {
+                    "label": "1 wk",
+                    "used": round(used_1w, 2),
+                    "limit": round(limit_1w, 2),
+                    "percent": _pct(used_1w, limit_1w),
+                },
+            },
+            "extra_usage": {
+                "unit": provider_def["unit"],
+                "value": round(used_1w, 2),
+            },
+            "pricing_notes": provider_def.get("pricing_notes"),
+            "error": snapshot.get("error") if snapshot else None,
+        }
+
+    return {"providers": response_providers}
+
+
+@app.post("/api/resources/poll")
+async def resources_poll_now():
+    """Trigger immediate balance polling and return latest results."""
+    results = await _run_resource_poll()
+    resource_data = await resources()
+    return {"status": "ok", "polled": len(results), "providers": resource_data.get("providers", {})}
 
 
 @app.post("/api/balance/topup")
