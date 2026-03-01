@@ -2,6 +2,7 @@
 Background balance polling and drift calibration.
 """
 import json
+import os
 import logging
 import re
 import sqlite3
@@ -9,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import httpx
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -96,14 +98,106 @@ class BalancePoller:
         )
 
     async def poll_elevenlabs(self) -> Dict[str, Any]:
-        return await self._poll_provider_page(
+        """Poll ElevenLabs subscription info. Prefers REST API when
+        XI_API_KEY or ELEVENLABS_API_KEY is set; falls back to browser scraping."""
+
+        # --- Try API first (far more reliable than browser scraping) ---
+        api_key = os.environ.get("XI_API_KEY") or os.environ.get("ELEVENLABS_API_KEY")
+        if api_key:
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(
+                        "https://api.elevenlabs.io/v1/user/subscription",
+                        headers={"xi-api-key": api_key},
+                        timeout=10.0,
+                    )
+                    resp.raise_for_status()
+                    data = resp.json()
+                remaining = data.get("character_count", 0)
+                total = data.get("character_limit", 0)
+                plan_name = data.get("tier", "").replace("_", " ").title() or None
+                return self._build_snapshot(
+                    provider="elevenlabs",
+                    snapshot_type="full_status",
+                    balance_amount=float(remaining),
+                    balance_currency="credits",
+                    balance_source="api",
+                    tier=plan_name,
+                    total_credits=float(total) if total else None,
+                    raw_response={"source": "api", "character_count": remaining, "character_limit": total},
+                )
+            except Exception as exc:
+                logger.warning("ElevenLabs API check failed, falling back to browser: %s", exc)
+
+        # --- Browser scraping fallback ---
+        try:
+            from playwright.async_api import async_playwright
+        except Exception:
+            return self._error_snapshot("elevenlabs", "playwright not installed")
+
+        url = "https://elevenlabs.io/app/subscription"
+        raw_response: Dict[str, Any] = {"url": url}
+        page_text = ""
+        try:
+            async with async_playwright() as p:
+                profile_dir = str(self.profiles_dir / "elevenlabs")
+                browser = await p.chromium.launch_persistent_context(
+                    user_data_dir=profile_dir,
+                    headless=True,
+                    viewport={"width": 1400, "height": 900},
+                )
+                page = await browser.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=20000)
+                except Exception:
+                    pass
+                # Wait for credits text to appear in the DOM
+                try:
+                    await page.wait_for_function(
+                        "() => document.body && /credit/i.test(document.body.innerText || '')",
+                        timeout=20000,
+                    )
+                except Exception:
+                    pass
+                await page.wait_for_timeout(3000)
+                page_text = await page.inner_text("body")
+                raw_response["body_length"] = len(page_text or "")
+                raw_response["body_preview"] = (page_text or "")[:500]
+                await browser.close()
+        except Exception as exc:
+            return self._error_snapshot(
+                "elevenlabs",
+                f"Browser scrape failed: {exc}. Set XI_API_KEY env var for reliable polling.",
+                raw_response=raw_response,
+            )
+
+        # Detect login redirect
+        lower_start = (page_text or "").lower()[:500]
+        if "sign in" in lower_start or "log in" in lower_start or "create account" in lower_start:
+            return self._error_snapshot(
+                "elevenlabs",
+                "Not logged in. Re-login to browser profile or set XI_API_KEY env var.",
+                raw_response=raw_response,
+            )
+
+        parsed = self._parse_elevenlabs_subscription_text(page_text or "")
+        if parsed["remaining_credits"] is None:
+            return self._error_snapshot(
+                "elevenlabs",
+                "Credits not found on page. Set XI_API_KEY env var for reliable polling.",
+                raw_response=raw_response,
+            )
+
+        return self._build_snapshot(
             provider="elevenlabs",
-            url="https://elevenlabs.io/subscription",
-            selectors=[
-                "text=/\\$\\s*[0-9,.]+/",
-                "[class*='balance']",
-                "[class*='credit']",
-            ],
+            snapshot_type="full_status",
+            balance_amount=parsed["remaining_credits"],
+            balance_currency="credits",
+            balance_source="browser_poll",
+            tier=parsed["plan_name"],
+            total_credits=parsed["total_credits"],
+            raw_response=raw_response,
         )
 
     async def poll_codex_cli(self) -> Dict[str, Any]:
@@ -162,8 +256,21 @@ class BalancePoller:
 
         candidate_text = raw_response.get("selected_text") or page_text
         parsed = self._parse_balance_text(candidate_text or "")
+        # Detect login/auth pages
+        lower_page = (page_text or "").lower()[:800]
+        if any(phrase in lower_page for phrase in ["sign in", "log in", "create account", "authenticate"]):
+            return self._error_snapshot(
+                provider,
+                f"Not logged in to {provider}. Open browser profile and log in.",
+                raw_response=raw_response,
+            )
+
         if parsed["amount"] is None:
-            return self._error_snapshot(provider, "balance not found in page", raw_response=raw_response)
+            return self._error_snapshot(
+                provider,
+                f"Balance not found on {provider} page. Check browser login session.",
+                raw_response=raw_response,
+            )
 
         rpm_limit = self._parse_first_int(page_text, r"\bRPM[^0-9]{0,15}([0-9,]{2,})")
         rpm_used = self._parse_first_int(page_text, r"\bused[^0-9]{0,15}([0-9,]{1,})\s*/\s*[0-9,]{1,}")
@@ -192,6 +299,7 @@ class BalancePoller:
         balance_source: str,
         raw_response: Optional[Dict[str, Any]] = None,
         tier: Optional[str] = None,
+        total_credits: Optional[float] = None,
         rpm_limit: Optional[int] = None,
         rpm_used: Optional[int] = None,
         rpm_remaining: Optional[int] = None,
@@ -205,6 +313,7 @@ class BalancePoller:
             "balance_currency": balance_currency,
             "balance_source": balance_source,
             "tier": tier,
+            "total_credits": total_credits,
             "rpm_limit": rpm_limit,
             "rpm_used": rpm_used,
             "rpm_remaining": rpm_remaining,
@@ -231,6 +340,7 @@ class BalancePoller:
             "balance_currency": None,
             "balance_source": "error",
             "tier": None,
+            "total_credits": None,
             "rpm_limit": None,
             "rpm_used": None,
             "rpm_remaining": None,
@@ -343,9 +453,9 @@ class BalancePoller:
                 """
                 INSERT INTO resource_snapshots (
                     provider, snapshot_type, timestamp, balance_amount, balance_currency,
-                    balance_source, tier, rpm_limit, rpm_used, rpm_remaining,
+                    balance_source, tier, total_credits, rpm_limit, rpm_used, rpm_remaining,
                     computed_cost, drift_amount, drift_percentage, raw_response
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.get("provider"),
@@ -355,6 +465,7 @@ class BalancePoller:
                     snapshot.get("balance_currency"),
                     snapshot.get("balance_source"),
                     snapshot.get("tier"),
+                    snapshot.get("total_credits"),
                     snapshot.get("rpm_limit"),
                     snapshot.get("rpm_used"),
                     snapshot.get("rpm_remaining"),
@@ -422,6 +533,7 @@ class BalancePoller:
                     "balance_currency": row["balance_currency"],
                     "balance_source": row["balance_source"],
                     "tier": row["tier"],
+                    "total_credits": row["total_credits"],
                     "rpm_limit": row["rpm_limit"],
                     "rpm_used": row["rpm_used"],
                     "rpm_remaining": row["rpm_remaining"],
@@ -449,6 +561,108 @@ class BalancePoller:
         if fallback:
             return {"amount": float(fallback.group(1).replace(",", "")), "currency": None}
         return {"amount": None, "currency": None}
+
+    @staticmethod
+    def _parse_elevenlabs_subscription_text(text: str) -> Dict[str, Optional[float]]:
+        if not text:
+            return {"plan_name": None, "remaining_credits": None, "total_credits": None}
+
+        normalized = re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
+        plan_name: Optional[str] = None
+        remaining_credits: Optional[float] = None
+        total_credits: Optional[float] = None
+        used_credits: Optional[float] = None
+
+        def _to_num(value: str) -> float:
+            return float(value.replace(",", ""))
+
+        # e.g. "98,432 of 100,000 credits"
+        of_match = re.search(
+            r"([0-9][0-9,]*)\s+of\s+([0-9][0-9,]*)\s*credits?",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if of_match:
+            remaining_credits = _to_num(of_match.group(1))
+            total_credits = _to_num(of_match.group(2))
+
+        # e.g. "used 1,568 of 100,000"
+        if total_credits is None or remaining_credits is None:
+            used_of_match = re.search(
+                r"used[^0-9]{0,10}([0-9][0-9,]*)\s+of\s+([0-9][0-9,]*)",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if used_of_match:
+                used_credits = _to_num(used_of_match.group(1))
+                total_credits = _to_num(used_of_match.group(2))
+                remaining_credits = max(total_credits - used_credits, 0.0)
+
+        slash_match = re.search(r"([0-9][0-9,]*)\s*/\s*([0-9][0-9,]*)\s*credits?", normalized, flags=re.IGNORECASE)
+        if slash_match:
+            remaining_credits = _to_num(slash_match.group(1))
+            total_credits = _to_num(slash_match.group(2))
+
+        if remaining_credits is None:
+            remaining_match = re.search(r"(?:remaining|left)[^0-9]{0,20}([0-9][0-9,]*)", normalized, flags=re.IGNORECASE)
+            if not remaining_match:
+                remaining_match = re.search(r"([0-9][0-9,]*)\s*credits?\s*(?:remaining|left)", normalized, flags=re.IGNORECASE)
+            if remaining_match:
+                remaining_credits = _to_num(remaining_match.group(1))
+
+        if total_credits is None:
+            total_match = re.search(
+                r"(?:monthly|per month|total|included|allowance|quota)[^0-9]{0,30}([0-9][0-9,]*)\s*credits?",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if not total_match:
+                total_match = re.search(r"([0-9][0-9,]*)\s*credits?\s*(?:monthly|included|total)", normalized, flags=re.IGNORECASE)
+            if total_match:
+                total_credits = _to_num(total_match.group(1))
+
+        # Standalone large numbers near "credits" if explicit labels are missing.
+        if remaining_credits is None or total_credits is None:
+            credit_numbers: List[float] = []
+            for match in re.finditer(r"([0-9][0-9,]{2,})\s*credits?", normalized, flags=re.IGNORECASE):
+                credit_numbers.append(_to_num(match.group(1)))
+            for match in re.finditer(r"credits?[^0-9]{0,20}([0-9][0-9,]{2,})", normalized, flags=re.IGNORECASE):
+                credit_numbers.append(_to_num(match.group(1)))
+            if credit_numbers:
+                if remaining_credits is None:
+                    remaining_credits = credit_numbers[0]
+                if total_credits is None and len(credit_numbers) > 1:
+                    total_credits = max(credit_numbers)
+                if total_credits is None and used_credits is not None:
+                    total_credits = credit_numbers[-1]
+                if total_credits is not None and used_credits is not None and remaining_credits is None:
+                    remaining_credits = max(total_credits - used_credits, 0.0)
+
+        for known_plan in ["Creator", "Starter", "Pro", "Scale", "Enterprise"]:
+            if re.search(rf"\b{known_plan}\b", normalized, flags=re.IGNORECASE):
+                plan_name = known_plan
+                break
+
+        if not plan_name:
+            plan_match = re.search(r"\b([A-Za-z][A-Za-z0-9 +_-]{1,30})\s+plan\b", normalized, flags=re.IGNORECASE)
+            if plan_match:
+                candidate = plan_match.group(1).strip()
+                if candidate.lower() not in {"current", "subscription", "your", "the"}:
+                    plan_name = candidate.title()
+        if not plan_name:
+            plan_match = re.search(
+                r"\b(?:current|subscription)?\s*plan\s*[:\-]?\s*([A-Za-z][A-Za-z0-9_-]{1,30})\b",
+                normalized,
+                flags=re.IGNORECASE,
+            )
+            if plan_match:
+                plan_name = plan_match.group(1).strip().title()
+
+        return {
+            "plan_name": plan_name,
+            "remaining_credits": remaining_credits,
+            "total_credits": total_credits,
+        }
 
     @staticmethod
     def _parse_first_int(text: str, pattern: str) -> Optional[int]:
