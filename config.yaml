@@ -3,6 +3,15 @@ server:
   port: 8050
 sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
 claude_code_tier: pro
+claude_extra_usage_limit: 25.0
+claude_usage_fallback:
+  spend_used: 24.49
+  spend_limit: 25.0
+  spend_reset_text: Mar 1
+  extra_usage_balance: 1.31
+scrape_error_stale_after_seconds: 900
+use_brave_cdp: false
+show_scrape_errors: false
 balance:
   anthropic:
     ledger:

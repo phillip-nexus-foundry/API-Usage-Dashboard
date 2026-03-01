@@ -1080,6 +1080,10 @@ th.sorted-desc::after {
     transition: width 0.25s ease;
 }
 
+.resource-meter-fill-right {
+    margin-left: auto;
+}
+
 .resource-meter-fill.status-ok {
     background: linear-gradient(90deg, #2ea043 0%, #3fb950 100%);
 }
@@ -1097,6 +1101,22 @@ th.sorted-desc::after {
     font-size: 16px;
     font-weight: 700;
     color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.resource-spend {
+    margin-top: 2px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.resource-window-meta {
+    margin-top: 4px;
+    font-size: 10px;
+    color: var(--text-secondary);
     font-variant-numeric: tabular-nums;
 }
 

@@ -484,11 +484,22 @@ function renderResources() {
         const extra = item.extra_usage || {};
         const value = Number(extra.value || 0);
         if (extra.unit === 'usd') {
-            const fixed = value.toFixed(2);
-            const clipped = fixed.startsWith('0') ? fixed.slice(1) : fixed;
-            return `$${clipped}`;
+            return `$${value.toFixed(2)}`;
         }
         return `${Math.round(value).toLocaleString()} credits`;
+    };
+    const formatReset = (resetAt) => {
+        if (!resetAt) return 'n/a';
+        return new Date(Number(resetAt)).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+    };
+    const formatRemaining = (seconds) => {
+        if (seconds === null || seconds === undefined) return 'n/a';
+        const s = Math.max(0, Number(seconds));
+        const d = Math.floor(s / 86400);
+        const h = Math.floor((s % 86400) / 3600);
+        const m = Math.floor((s % 3600) / 60);
+        if (d > 0) return `${d}d ${h}h ${m}m`;
+        return `${h}h ${m}m`;
     };
 
     for (const item of providers) {
@@ -508,6 +519,8 @@ function renderResources() {
         const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
         const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
         const creditsStatusClass = usedPct >= 90 ? 'critical' : usedPct >= 75 ? 'warn' : 'ok';
+        const resetMeta5h = `<div class="resource-window-meta">Resets: ${formatReset(w5h.reset_at)} | Remaining Time: ${formatRemaining(w5h.remaining_seconds)}</div>`;
+        const resetMeta1w = `<div class="resource-window-meta">Resets: ${formatReset(w1w.reset_at)} | Remaining Time: ${formatRemaining(w1w.remaining_seconds)}</div>`;
         const windowsMarkup = hasWindows ? `
             <div class="resource-meter">
                 <div class="resource-meter-head">
@@ -517,6 +530,7 @@ function renderResources() {
                 <div class="resource-meter-track">
                     <div class="resource-meter-fill status-${statusClass5h}" style="width:${p5h}%"></div>
                 </div>
+                ${resetMeta5h}
             </div>
             <div class="resource-meter">
                 <div class="resource-meter-head">
@@ -526,6 +540,7 @@ function renderResources() {
                 <div class="resource-meter-track">
                     <div class="resource-meter-fill status-${statusClass1w}" style="width:${p1w}%"></div>
                 </div>
+                ${resetMeta1w}
             </div>
         ` : hasCreditProgress ? `
             <div class="resource-meter">
@@ -534,12 +549,32 @@ function renderResources() {
                     <span>${Math.round(totalCredits).toLocaleString()} total</span>
                 </div>
                 <div class="resource-meter-track">
-                    <div class="resource-meter-fill status-${creditsStatusClass}" style="width:${usedPct}%"></div>
+                    <div class="resource-meter-fill status-${creditsStatusClass} resource-meter-fill-right" style="width:${remainingPct}%"></div>
                 </div>
             </div>
         ` : '';
-        const extraLabel = isElevenLabs ? '' : 'Extra Usage: ';
-        const extraMarkup = hasCreditProgress ? '' : `<div class="resource-extra">${extraLabel}${formatExtraUsage(item)}</div>`;
+        const extraLabel = isElevenLabs ? '' : `${item.extra_usage?.label || 'Extra Usage'}: `;
+        const extraBody = formatExtraUsage(item);
+        const extraMarkup = hasCreditProgress ? '' : `<div class="resource-extra">${extraLabel}${extraBody}</div>`;
+        const spendUsed = item.spend_limit?.used;
+        const spendLimit = item.spend_limit?.limit;
+        const spendReset = item.spend_limit?.reset_text;
+        const spendPct = (spendUsed !== null && spendUsed !== undefined && spendLimit) ? Math.max(0, Math.min(100, (Number(spendUsed) / Number(spendLimit)) * 100)) : 0;
+        const spendStatusClass = spendPct >= 90 ? 'critical' : spendPct >= 70 ? 'warn' : 'ok';
+        const spendMarkup = (spendUsed !== null && spendUsed !== undefined && spendLimit !== null && spendLimit !== undefined)
+            ? `
+                <div class="resource-meter">
+                    <div class="resource-meter-head">
+                        <span>Spend Limit: $${Number(spendUsed).toFixed(2)} / $${Number(spendLimit).toFixed(2)}</span>
+                        <span>${spendPct.toFixed(1)}%</span>
+                    </div>
+                    <div class="resource-meter-track">
+                        <div class="resource-meter-fill status-${spendStatusClass}" style="width:${spendPct}%"></div>
+                    </div>
+                    ${spendReset ? `<div class="resource-window-meta">Resets: ${spendReset}</div>` : ''}
+                </div>
+            `
+            : '';
 
         const card = document.createElement('div');
         card.className = 'resource-item';
@@ -549,6 +584,7 @@ function renderResources() {
                 <span>${item.display_name || item.provider}</span>
             </div>
             ${windowsMarkup}
+            ${spendMarkup}
             ${extraMarkup}
             <div class="resource-meta">Updated ${age}</div>
             ${error}

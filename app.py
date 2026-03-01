@@ -5,6 +5,7 @@ FastAPI application for API Usage Dashboard.
 import os
 import json
 import time
+import asyncio
 import yaml
 import logging
 import threading
@@ -207,7 +208,8 @@ def _resource_status(snapshot: Dict[str, Any]) -> str:
 async def _run_resource_poll() -> List[Dict[str, Any]]:
     _reload_config_from_disk()
     balance_poller.refresh_config(CONFIG)
-    return await balance_poller.poll_all(["anthropic", "elevenlabs", "codex_cli"])
+    # Poll all providers in background so both Balance and Resource cards stay live.
+    return await balance_poller.poll_all(["anthropic", "elevenlabs", "codex_cli", "moonshot", "minimax"])
 
 
 async def _resource_poll_job():
@@ -304,8 +306,8 @@ async def lifespan(_app: FastAPI):
     else:
         logger.warning("APScheduler not installed; background polling scheduler disabled")
 
-    # Initial poll on startup for quick visibility
-    await _resource_poll_job()
+    # Initial poll on startup for quick visibility (non-blocking).
+    asyncio.create_task(_resource_poll_job())
     logger.info("Startup complete")
     try:
         yield
@@ -935,6 +937,9 @@ async def balance():
     _reload_config_from_disk()
     balances = await balance_checker.check_balances(reader)
     snapshots = balance_poller.get_latest_snapshots()
+    now_ms = int(_utc_now().timestamp() * 1000)
+    stale_error_ms = int(CONFIG.get("scrape_error_stale_after_seconds", 900)) * 1000
+    show_scrape_errors = bool(CONFIG.get("show_scrape_errors", False))
 
     snapshot_aliases = {
         "anthropic": ["anthropic"],
@@ -945,14 +950,17 @@ async def balance():
     }
     for snapshot_provider, snapshot in snapshots.items():
         scrape_error = snapshot.get("error")
+        ts = snapshot.get("timestamp")
+        if scrape_error and ts and (now_ms - int(ts)) > stale_error_ms:
+            scrape_error = None
         aliases = snapshot_aliases.get(snapshot_provider, [snapshot_provider])
         attached = False
         for alias in aliases:
             if alias in balances:
-                balances[alias]["scrape_error"] = scrape_error
+                balances[alias]["scrape_error"] = scrape_error if show_scrape_errors else None
                 attached = True
         if not attached:
-            balances.setdefault(snapshot_provider, {})["scrape_error"] = scrape_error
+            balances.setdefault(snapshot_provider, {})["scrape_error"] = scrape_error if show_scrape_errors else None
 
     # Attach ledger history for any provider that has one
     balance_cfg = CONFIG.get("balance", {})
@@ -1028,6 +1036,40 @@ async def balance():
                 proj_data["usage_cost"] = round(row[1], 6)
                 proj_data["usage_tokens"] = row[2]
 
+    # Balance Tracker should only include configured balance providers.
+    configured_balance_providers = set((CONFIG.get("balance") or {}).keys())
+    balances = {k: v for k, v in balances.items() if k in configured_balance_providers}
+
+    # Prefer latest scraped balances when available to keep cards live without API keys.
+    for provider_name, provider_data in balances.items():
+        snapshot = snapshots.get(provider_name)
+        if not snapshot:
+            continue
+        snap_balance = snapshot.get("balance_amount")
+        if snap_balance is None:
+            continue
+        provider_data["remaining"] = round(float(snap_balance), 2)
+        provider_data.pop("api_note", None)
+        provider_data["scrape_error"] = None
+        if provider_data.get("total_deposits") is not None:
+            provider_data["cumulative_cost"] = round(
+                float(provider_data["total_deposits"]) - float(provider_data["remaining"]),
+                6,
+            )
+            provider_data["usage_cost"] = provider_data["cumulative_cost"]
+        # Keep selected project card aligned for single-project providers.
+        projects = provider_data.get("projects")
+        if isinstance(projects, dict) and len(projects) == 1:
+            only_project = next(iter(projects.values()))
+            if isinstance(only_project, dict):
+                only_project["remaining"] = provider_data["remaining"]
+                if only_project.get("total_deposits") is not None:
+                    only_project["cumulative_cost"] = round(
+                        float(only_project["total_deposits"]) - float(only_project["remaining"]),
+                        6,
+                    )
+                    only_project["usage_cost"] = only_project["cumulative_cost"]
+
     return balances
 
 
@@ -1045,6 +1087,7 @@ def _get_claude_code_tier_display() -> str:
         'max_200': 'Claude Code Max ($200/mo)',
     }
     return tier_map.get(tier, 'Claude Code Pro ($20/mo)')
+
 
 @app.get("/api/resources")
 async def resources():
@@ -1070,7 +1113,7 @@ async def resources():
         "codex_cli": {
             "display_name": "Codex CLI",
             "usage_provider_aliases": ["openclaw", "codex_cli"],
-            "window_limits": {},
+            "window_limits": {"five_hour": 400, "one_week": 1050},
             "unit": "credits",
             "pricing_notes": {
                 "minimum_purchase": "1,000 credits per purchase",
@@ -1083,9 +1126,10 @@ async def resources():
     now_ms = int(_utc_now().timestamp() * 1000)
     five_hour_start = now_ms - (5 * 60 * 60 * 1000)  # 5 hours ago
     one_week_start = now_ms - (7 * 24 * 60 * 60 * 1000)
+    show_scrape_errors = bool(CONFIG.get("show_scrape_errors", False))
     snapshots = balance_poller.get_latest_snapshots(list(provider_defs.keys()))
 
-    def _window_usage(provider_aliases: List[str], since_ms: int) -> Dict[str, float]:
+    def _window_usage(provider_aliases: List[str], since_ms: int) -> Dict[str, Any]:
         placeholders = ",".join("?" * len(provider_aliases))
         params: List[Any] = [*provider_aliases, since_ms]
         with sqlite3.connect(reader.db_path) as conn:
@@ -1094,15 +1138,22 @@ async def resources():
                 f"""
                 SELECT
                     COUNT(*),
-                    COALESCE(SUM(cost_total), 0.0)
+                    COALESCE(SUM(cost_total), 0.0),
+                    MIN(timestamp),
+                    MAX(timestamp)
                 FROM records
                 WHERE provider IN ({placeholders})
                   AND timestamp >= ?
                 """,
                 params,
             )
-            row = cursor.fetchone() or (0, 0.0)
-            return {"calls": int(row[0] or 0), "cost": float(row[1] or 0.0)}
+            row = cursor.fetchone() or (0, 0.0, None, None)
+            return {
+                "calls": int(row[0] or 0),
+                "cost": float(row[1] or 0.0),
+                "first_ts": int(row[2]) if row[2] is not None else None,
+                "last_ts": int(row[3]) if row[3] is not None else None,
+            }
 
     def _to_provider_units(unit: str, usage_cost: float, usage_calls: int, provider_key: str) -> float:
         if unit == "usd":
@@ -1120,6 +1171,14 @@ async def resources():
         if not limit or limit <= 0:
             return 0.0
         return round(min(100.0, (used / limit) * 100.0), 1)
+
+    def _window_reset_meta(window_usage: Dict[str, Any], window_ms: int) -> Dict[str, Optional[int]]:
+        first_ts = window_usage.get("first_ts")
+        if not first_ts:
+            return {"reset_at": None, "remaining_seconds": None}
+        reset_at = int(first_ts) + int(window_ms)
+        remaining_seconds = max(0, (reset_at - now_ms) // 1000)
+        return {"reset_at": reset_at, "remaining_seconds": int(remaining_seconds)}
 
     response_providers: Dict[str, Dict[str, Any]] = {}
     for provider_key, provider_def in provider_defs.items():
@@ -1146,6 +1205,38 @@ async def resources():
                 extra_value = round(float(bal), 2)
             if tier:
                 display_name = f"ElevenLabs ({tier})"
+        elif provider_key == "anthropic":
+            extra_limit = float(CONFIG.get("claude_extra_usage_limit", 25.0))
+            # Display remaining extra usage budget over configured limit.
+            extra_value = round(max(extra_limit - used_1w, 0.0), 2)
+            total_credits = extra_limit
+            usage_payload = (snapshot.get("raw_payload") or {}).get("claude_usage") if snapshot else {}
+            fallback = CONFIG.get("claude_usage_fallback", {}) or {}
+            spend_used = usage_payload.get("spend_used") if isinstance(usage_payload, dict) else None
+            spend_limit = usage_payload.get("spend_limit") if isinstance(usage_payload, dict) else None
+            spend_reset_text = usage_payload.get("spend_reset_text") if isinstance(usage_payload, dict) else None
+            extra_balance = usage_payload.get("extra_usage_balance") if isinstance(usage_payload, dict) else None
+            if spend_used is None:
+                spend_used = fallback.get("spend_used")
+            if spend_limit is None:
+                spend_limit = fallback.get("spend_limit", extra_limit)
+            if spend_reset_text is None:
+                spend_reset_text = fallback.get("spend_reset_text")
+            if extra_balance is None:
+                extra_balance = fallback.get("extra_usage_balance")
+            if isinstance(extra_balance, (int, float)):
+                extra_value = round(float(extra_balance), 2)
+            if isinstance(spend_limit, (int, float)):
+                total_credits = round(float(spend_limit), 2)
+        elif provider_key == "codex_cli":
+            extra_value = 0.0
+
+        window_5h_meta = _window_reset_meta(usage_5h, 5 * 60 * 60 * 1000)
+        window_1w_meta = _window_reset_meta(usage_1w, 7 * 24 * 60 * 60 * 1000)
+        if provider_key == "anthropic":
+            # Claude web usage windows are not present in local telemetry yet.
+            window_5h_meta = {"reset_at": None, "remaining_seconds": None}
+            window_1w_meta = {"reset_at": None, "remaining_seconds": None}
 
         response_providers[provider_key] = {
             "provider": provider_key,
@@ -1158,23 +1249,33 @@ async def resources():
                     "used": round(used_5h, 2),
                     "limit": round(limit_5h, 2),
                     "percent": _pct(used_5h, limit_5h),
+                    "reset_at": window_5h_meta["reset_at"],
+                    "remaining_seconds": window_5h_meta["remaining_seconds"],
                 },
                 "one_week": {
                     "label": "1 wk",
                     "used": round(used_1w, 2),
                     "limit": round(limit_1w, 2),
                     "percent": _pct(used_1w, limit_1w),
+                    "reset_at": window_1w_meta["reset_at"],
+                    "remaining_seconds": window_1w_meta["remaining_seconds"],
                 },
             } if is_window_based else None,
             "extra_usage": {
                 "unit": provider_def["unit"],
                 "value": extra_value,
                 "total": round(float(total_credits), 2) if total_credits is not None else None,
+                "label": "Extra Usage Balance" if provider_key == "anthropic" else None,
             },
+            "spend_limit": {
+                "used": round(float(spend_used), 2) if provider_key == "anthropic" and isinstance(spend_used, (int, float)) else None,
+                "limit": round(float(total_credits), 2) if provider_key == "anthropic" and total_credits is not None else None,
+                "reset_text": spend_reset_text if provider_key == "anthropic" else None,
+            } if provider_key == "anthropic" else None,
             "tier": tier,
             "total_credits": round(float(total_credits), 2) if total_credits is not None else None,
             "pricing_notes": provider_def.get("pricing_notes"),
-            "error": snapshot.get("error") if snapshot else None,
+            "error": (snapshot.get("error") if (snapshot and show_scrape_errors) else None),
         }
 
     # Enforce exclusion of balance-only providers (e.g. minimax, moonshot)

@@ -79,7 +79,7 @@ class BalancePoller:
         )
 
     async def poll_anthropic(self) -> Dict[str, Any]:
-        return await self._poll_provider_page(
+        snapshot = await self._poll_provider_page(
             provider="anthropic",
             url="https://console.anthropic.com/settings/billing",
             selectors=[
@@ -88,6 +88,13 @@ class BalancePoller:
                 "text=/\\$\\s*[0-9,.]+/",
             ],
         )
+        # Enrich with Claude UI usage data (spend limit + extra usage balance) if available.
+        usage = await self._poll_claude_usage_page()
+        if usage:
+            raw = snapshot.get("raw_response") or {}
+            raw["claude_usage"] = usage
+            snapshot["raw_response"] = raw
+        return snapshot
 
     async def poll_minimax(self) -> Dict[str, Any]:
         return await self._poll_provider_page(
@@ -144,12 +151,12 @@ class BalancePoller:
         try:
             async with async_playwright() as p:
                 profile_dir = str(self.profiles_dir / "elevenlabs")
-                browser = await p.chromium.launch_persistent_context(
+                context = await p.chromium.launch_persistent_context(
                     user_data_dir=profile_dir,
                     headless=True,
                     viewport={"width": 1400, "height": 900},
                 )
-                page = await browser.new_page()
+                page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=45000)
                 try:
                     await page.wait_for_load_state("networkidle", timeout=20000)
@@ -164,14 +171,40 @@ class BalancePoller:
                 except Exception:
                     pass
                 await page.wait_for_timeout(3000)
-                page_text = await page.inner_text("body")
+                page_text = await self._read_body_text(page, context)
                 raw_response["body_length"] = len(page_text or "")
                 raw_response["body_preview"] = (page_text or "")[:500]
-                await browser.close()
+
+                # Try authenticated API call via browser session cookies.
+                try:
+                    sub_resp = await context.request.get(
+                        "https://api.elevenlabs.io/v1/user/subscription",
+                        timeout=10000,
+                    )
+                    if sub_resp.status == 200:
+                        data = await sub_resp.json()
+                        remaining = data.get("character_count", 0)
+                        total = data.get("character_limit", 0)
+                        plan_name = data.get("tier", "").replace("_", " ").title() or None
+                        await context.close()
+                        return self._build_snapshot(
+                            provider="elevenlabs",
+                            snapshot_type="full_status",
+                            balance_amount=float(remaining),
+                            balance_currency="credits",
+                            balance_source="browser_session_api",
+                            tier=plan_name,
+                            total_credits=float(total) if total else None,
+                            raw_response={"source": "browser_session_api", "character_count": remaining, "character_limit": total},
+                        )
+                except Exception:
+                    pass
+
+                await context.close()
         except Exception as exc:
             return self._error_snapshot(
                 "elevenlabs",
-                f"Browser scrape failed: {exc}. Set XI_API_KEY env var for reliable polling.",
+                f"Browser scrape failed: {exc}",
                 raw_response=raw_response,
             )
 
@@ -181,7 +214,7 @@ class BalancePoller:
             if "sign in" in lower_start or "log in" in lower_start or "create account" in lower_start:
                 return self._error_snapshot(
                     "elevenlabs",
-                    "Not logged in. Re-login to browser profile or set XI_API_KEY env var.",
+                    "Not logged in to ElevenLabs browser profile.",
                     raw_response=raw_response,
                 )
 
@@ -189,7 +222,7 @@ class BalancePoller:
         if parsed["remaining_credits"] is None:
             return self._error_snapshot(
                 "elevenlabs",
-                "Credits not found on page. Set XI_API_KEY env var for reliable polling.",
+                "Credits not found on ElevenLabs subscription page.",
                 raw_response=raw_response,
             )
 
@@ -206,16 +239,114 @@ class BalancePoller:
 
     async def poll_codex_cli(self) -> Dict[str, Any]:
         """
-        Placeholder poller until Codex CLI exposes a direct balance endpoint.
+        Codex CLI polling placeholder: no direct upstream balance endpoint yet.
         """
         return self._build_snapshot(
             provider="codex_cli",
             snapshot_type="usage_status",
-            balance_amount=1000.0,
+            balance_amount=0.0,
             balance_currency="credits",
-            balance_source="simulated",
-            raw_response={"note": "Placeholder Codex CLI credits snapshot"},
+            balance_source="synthetic",
+            raw_response={"note": "No direct Codex CLI endpoint; usage is derived from local telemetry."},
         )
+
+    async def _poll_claude_usage_page(self) -> Dict[str, Any]:
+        """Best-effort scrape of Claude usage page for spend/extra usage display."""
+        try:
+            from playwright.async_api import async_playwright  # pylint: disable=import-outside-toplevel
+        except Exception:
+            return {}
+
+        use_cdp = bool(self.config.get("use_brave_cdp", False))
+        url = "https://claude.ai/settings/usage"
+        page_text = ""
+        final_url = url
+        try:
+            async with async_playwright() as p:
+                browser = None
+                if use_cdp:
+                    try:
+                        browser = await p.chromium.connect_over_cdp(
+                            f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
+                            timeout=10000,
+                        )
+                        context = browser.contexts[0]
+                    except Exception:
+                        browser = None
+                        context = await p.chromium.launch_persistent_context(
+                            user_data_dir=str(self.profiles_dir / "anthropic"),
+                            headless=True,
+                            viewport={"width": 1400, "height": 900},
+                        )
+                else:
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=str(self.profiles_dir / "anthropic"),
+                        headless=True,
+                        viewport={"width": 1400, "height": 900},
+                    )
+
+                page = await context.new_page()
+                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1200)
+                page_text = await self._read_body_text(page, context)
+                final_url = page.url if page and (not page.is_closed()) else url
+                if not page.is_closed():
+                    await page.close()
+                if browser:
+                    await browser.close()
+                else:
+                    await context.close()
+        except Exception:
+            return {}
+
+        lower = (page_text or "").lower()
+        if any(part in (final_url or "").lower() for part in ["login", "log-in", "sign-in", "signin", "auth"]) or (
+            "password" in lower and ("sign in" in lower or "log in" in lower)
+        ):
+            return {"logged_in": False}
+
+        normalized = re.sub(r"\s+", " ", page_text.replace("\xa0", " ")).strip()
+        spend_used = None
+        spend_limit = None
+        spend_reset_text = None
+        extra_usage_balance = None
+
+        spend_match = re.search(
+            r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*/\s*\$\s*([0-9]+(?:\.[0-9]+)?)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if spend_match:
+            spend_used = float(spend_match.group(1))
+            spend_limit = float(spend_match.group(2))
+
+        reset_match = re.search(
+            r"resets?\s*([A-Za-z]{3,9}\s+\d{1,2}(?:,\s*\d{4})?)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if reset_match:
+            spend_reset_text = reset_match.group(1).strip()
+
+        extra_match = re.search(
+            r"extra usage(?:\s+balance)?[^$]{0,40}\$\s*([0-9]+(?:\.[0-9]+)?)",
+            normalized,
+            flags=re.IGNORECASE,
+        )
+        if extra_match:
+            extra_usage_balance = float(extra_match.group(1))
+
+        return {
+            "logged_in": True,
+            "spend_used": spend_used,
+            "spend_limit": spend_limit,
+            "spend_reset_text": spend_reset_text,
+            "extra_usage_balance": extra_usage_balance,
+        }
 
     async def _poll_provider_page(
         self,
@@ -230,45 +361,59 @@ class BalancePoller:
 
         raw_response: Dict[str, Any] = {"url": url, "selected_text": None}
         page_text = ""
+        use_cdp = bool(self.config.get("use_brave_cdp", False))
         try:
             async with async_playwright() as p:
-                # Connect to running Brave instance via CDP (shares login sessions)
-                try:
-                    browser = await p.chromium.connect_over_cdp(
-                        f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
-                        timeout=10000,
-                    )
-                    context = browser.contexts[0]  # Use Brave's default context (has cookies)
-                except Exception as cdp_exc:
-                    # Fallback: launch isolated Chromium if Brave CDP not available
-                    logger.warning(
-                        "CDP connection to Brave failed (%s), falling back to isolated browser",
-                        cdp_exc,
-                    )
+                browser = None
+                if use_cdp:
+                    # Optional foreground mode for shared Brave cookies.
+                    # Disabled by default to avoid visible tab opening.
+                    try:
+                        browser = await p.chromium.connect_over_cdp(
+                            f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
+                            timeout=10000,
+                        )
+                        context = browser.contexts[0]
+                    except Exception as cdp_exc:
+                        logger.warning("CDP connection failed (%s), using headless profile", cdp_exc)
+                        browser = None
+                        context = await p.chromium.launch_persistent_context(
+                            user_data_dir=str(self.profiles_dir / provider),
+                            headless=True,
+                            viewport={"width": 1400, "height": 900},
+                        )
+                else:
                     context = await p.chromium.launch_persistent_context(
                         user_data_dir=str(self.profiles_dir / provider),
                         headless=True,
                         viewport={"width": 1400, "height": 900},
                     )
-                    browser = None  # context IS the browser in persistent mode
 
                 page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                await page.wait_for_timeout(1200)
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=15000)
+                except Exception:
+                    pass
+                await page.wait_for_timeout(1500)
 
                 selected_text = None
                 for selector in selectors:
                     try:
                         await page.wait_for_selector(selector, timeout=6000)
-                        selected_text = await page.locator(selector).first.inner_text()
+                        selected_text = (await page.locator(selector).first.text_content()) or ""
                         if selected_text:
                             break
                     except Exception:
                         continue
 
-                page_text = await page.inner_text("body")
+                page_text = await self._read_body_text(page, context)
                 raw_response["selected_text"] = selected_text
-                await page.close()
+                raw_response["final_url"] = page.url if page and (not page.is_closed()) else url
+                raw_response["body_length"] = len(page_text or "")
+                raw_response["body_preview"] = (page_text or "")[:600]
+                if not page.is_closed():
+                    await page.close()
                 if browser:
                     await browser.close()  # Disconnect CDP (does NOT close Brave)
                 else:
@@ -277,18 +422,19 @@ class BalancePoller:
             return self._error_snapshot(provider, str(exc), raw_response=raw_response)
 
         candidate_text = raw_response.get("selected_text") or page_text
-        parsed = self._parse_balance_text(candidate_text or "")
+        parsed = self._parse_provider_balance(provider, candidate_text or "", page_text or "")
         if parsed["amount"] is None:
             # Check if we landed on a login page (short body with auth keywords)
             lower_page = (page_text or "").lower()
+            final_url = str(raw_response.get("final_url") or "").lower()
             is_login_page = (
-                len(page_text or "") < 2000
-                and any(phrase in lower_page for phrase in ["sign in", "log in", "create account"])
+                any(part in final_url for part in ["login", "log-in", "sign-in", "signin", "auth"])
+                or ("password" in lower_page and ("email" in lower_page or "sign in" in lower_page or "log in" in lower_page))
             )
             if is_login_page:
                 return self._error_snapshot(
                     provider,
-                    f"Not logged in to {provider}. Open browser profile and log in.",
+                    f"Not logged in to {provider}.",
                     raw_response=raw_response,
                 )
             return self._error_snapshot(
@@ -314,6 +460,53 @@ class BalancePoller:
             rpm_remaining=rpm_remaining,
             raw_response=raw_response,
         )
+
+    @staticmethod
+    async def _read_body_text(page, context) -> str:
+        """Safely read body text even if the original page closed during SPA nav."""
+        try:
+            if page and (not page.is_closed()):
+                return await page.inner_text("body")
+        except Exception:
+            pass
+        try:
+            for candidate in reversed(context.pages):
+                if candidate and (not candidate.is_closed()):
+                    return await candidate.inner_text("body")
+        except Exception:
+            pass
+        return ""
+
+    def _parse_provider_balance(self, provider: str, selected_text: str, page_text: str) -> Dict[str, Optional[float]]:
+        if provider == "anthropic":
+            patterns = [
+                r"remaining[^$¥€£]{0,30}([$¥€£]\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+                r"available[^$¥€£]{0,30}([$¥€£]\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+                r"balance[^$¥€£]{0,30}([$¥€£]\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_text, flags=re.IGNORECASE)
+                if match:
+                    parsed = self._parse_balance_text(match.group(1))
+                    if parsed["amount"] is not None:
+                        return parsed
+
+        if provider in {"moonshot", "minimax"}:
+            patterns = [
+                r"(?:balance|available|wallet|credit)[^$¥€£]{0,30}([$¥€£]\s*[0-9][0-9,]*(?:\.[0-9]+)?)",
+                r"([$¥€£]\s*[0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:remaining|balance|available)",
+            ]
+            for pattern in patterns:
+                match = re.search(pattern, page_text, flags=re.IGNORECASE)
+                if match:
+                    parsed = self._parse_balance_text(match.group(1))
+                    if parsed["amount"] is not None:
+                        return parsed
+
+        parsed = self._parse_balance_text(selected_text or "")
+        if parsed["amount"] is not None:
+            return parsed
+        return self._parse_balance_text(page_text or "")
 
     def _build_snapshot(
         self,
@@ -567,6 +760,7 @@ class BalancePoller:
                     "drift_percentage": row["drift_percentage"],
                     "status": status,
                     "error": parsed_raw.get("error"),
+                    "raw_payload": parsed_raw.get("payload") if isinstance(parsed_raw, dict) else {},
                 }
         return latest
 
@@ -582,9 +776,6 @@ class BalancePoller:
             currency = {"$": "USD", "¥": "CNY", "￥": "CNY", "€": "EUR", "£": "GBP"}.get(symbol)
             return {"amount": amount, "currency": currency}
 
-        fallback = re.search(r"\b([0-9][0-9,]*(?:\.[0-9]+)?)\b", normalized)
-        if fallback:
-            return {"amount": float(fallback.group(1).replace(",", "")), "currency": None}
         return {"amount": None, "currency": None}
 
     @staticmethod
