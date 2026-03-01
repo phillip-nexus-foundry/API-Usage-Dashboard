@@ -502,11 +502,12 @@ function renderResources() {
         const totalCredits = Number(item.total_credits ?? item.extra_usage?.total ?? 0);
         const hasCreditProgress = isElevenLabs && totalCredits > 0;
         const remainingPct = hasCreditProgress ? Math.max(0, Math.min(100, (remainingCredits / totalCredits) * 100)) : 0;
+        const usedPct = hasCreditProgress ? (100 - remainingPct) : 0;
         const age = item.age_seconds !== null && item.age_seconds !== undefined ? `${Math.floor(item.age_seconds / 60)}m ago` : 'n/a';
         const error = item.error ? `<div class="resource-error">${item.error}</div>` : '';
         const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
         const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
-        const creditsStatusClass = remainingPct <= 10 ? 'critical' : remainingPct <= 25 ? 'warn' : 'ok';
+        const creditsStatusClass = usedPct >= 90 ? 'critical' : usedPct >= 75 ? 'warn' : 'ok';
         const windowsMarkup = hasWindows ? `
             <div class="resource-meter">
                 <div class="resource-meter-head">
@@ -533,7 +534,7 @@ function renderResources() {
                     <span>${Math.round(totalCredits).toLocaleString()} total</span>
                 </div>
                 <div class="resource-meter-track">
-                    <div class="resource-meter-fill status-${creditsStatusClass}" style="width:${remainingPct}%"></div>
+                    <div class="resource-meter-fill status-${creditsStatusClass}" style="width:${usedPct}%"></div>
                 </div>
             </div>
         ` : '';
