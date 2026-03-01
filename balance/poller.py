@@ -15,6 +15,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Brave CDP port for connecting to running instance
+_BRAVE_CDP_PORT = int(os.environ.get("BRAVE_CDP_PORT", "9222"))
+
 _PROVIDER_ALIASES = {
     "minimax": ["minimax", "mini_max", "minimaxai"],
     "codex_cli": ["codex_cli", "openclaw"],
@@ -229,13 +232,27 @@ class BalancePoller:
         page_text = ""
         try:
             async with async_playwright() as p:
-                profile_dir = str(self.profiles_dir / provider)
-                browser = await p.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=True,
-                    viewport={"width": 1400, "height": 900},
-                )
-                page = await browser.new_page()
+                # Connect to running Brave instance via CDP (shares login sessions)
+                try:
+                    browser = await p.chromium.connect_over_cdp(
+                        f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
+                        timeout=10000,
+                    )
+                    context = browser.contexts[0]  # Use Brave's default context (has cookies)
+                except Exception as cdp_exc:
+                    # Fallback: launch isolated Chromium if Brave CDP not available
+                    logger.warning(
+                        "CDP connection to Brave failed (%s), falling back to isolated browser",
+                        cdp_exc,
+                    )
+                    context = await p.chromium.launch_persistent_context(
+                        user_data_dir=str(self.profiles_dir / provider),
+                        headless=True,
+                        viewport={"width": 1400, "height": 900},
+                    )
+                    browser = None  # context IS the browser in persistent mode
+
+                page = await context.new_page()
                 await page.goto(url, wait_until="domcontentloaded", timeout=30000)
                 await page.wait_for_timeout(1200)
 
@@ -251,7 +268,11 @@ class BalancePoller:
 
                 page_text = await page.inner_text("body")
                 raw_response["selected_text"] = selected_text
-                await browser.close()
+                await page.close()
+                if browser:
+                    await browser.close()  # Disconnect CDP (does NOT close Brave)
+                else:
+                    await context.close()  # Close isolated browser
         except Exception as exc:
             return self._error_snapshot(provider, str(exc), raw_response=raw_response)
 
