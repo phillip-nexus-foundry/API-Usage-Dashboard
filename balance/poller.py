@@ -65,7 +65,7 @@ class BalancePoller:
     async def poll_moonshot(self) -> Dict[str, Any]:
         return await self._poll_provider_page(
             provider="moonshot",
-            url="https://platform.moonshot.cn/console/wallet",
+            url="https://platform.moonshot.ai/console/account",
             selectors=[
                 "text=/[\\u00a5$]\\s*[0-9,.]+/",
                 "text=/balance|credit|wallet/i",
@@ -172,14 +172,15 @@ class BalancePoller:
                 raw_response=raw_response,
             )
 
-        # Detect login redirect
-        lower_start = (page_text or "").lower()[:500]
-        if "sign in" in lower_start or "log in" in lower_start or "create account" in lower_start:
-            return self._error_snapshot(
-                "elevenlabs",
-                "Not logged in. Re-login to browser profile or set XI_API_KEY env var.",
-                raw_response=raw_response,
-            )
+        # Detect login redirect (only if page is short / clearly a login form)
+        if len(page_text or "") < 2000:
+            lower_start = (page_text or "").lower()
+            if "sign in" in lower_start or "log in" in lower_start or "create account" in lower_start:
+                return self._error_snapshot(
+                    "elevenlabs",
+                    "Not logged in. Re-login to browser profile or set XI_API_KEY env var.",
+                    raw_response=raw_response,
+                )
 
         parsed = self._parse_elevenlabs_subscription_text(page_text or "")
         if parsed["remaining_credits"] is None:
@@ -256,19 +257,22 @@ class BalancePoller:
 
         candidate_text = raw_response.get("selected_text") or page_text
         parsed = self._parse_balance_text(candidate_text or "")
-        # Detect login/auth pages
-        lower_page = (page_text or "").lower()[:800]
-        if any(phrase in lower_page for phrase in ["sign in", "log in", "create account", "authenticate"]):
-            return self._error_snapshot(
-                provider,
-                f"Not logged in to {provider}. Open browser profile and log in.",
-                raw_response=raw_response,
-            )
-
         if parsed["amount"] is None:
+            # Check if we landed on a login page (short body with auth keywords)
+            lower_page = (page_text or "").lower()
+            is_login_page = (
+                len(page_text or "") < 2000
+                and any(phrase in lower_page for phrase in ["sign in", "log in", "create account"])
+            )
+            if is_login_page:
+                return self._error_snapshot(
+                    provider,
+                    f"Not logged in to {provider}. Open browser profile and log in.",
+                    raw_response=raw_response,
+                )
             return self._error_snapshot(
                 provider,
-                f"Balance not found on {provider} page. Check browser login session.",
+                f"Balance not found on {provider} page. The page loaded but no balance value was detected.",
                 raw_response=raw_response,
             )
 

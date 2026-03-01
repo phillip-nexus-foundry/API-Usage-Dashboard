@@ -180,6 +180,16 @@ def _resource_status(snapshot: Dict[str, Any]) -> str:
     if snapshot.get("error"):
         return "critical"
     balance = snapshot.get("balance_amount")
+    total_credits = snapshot.get("total_credits")
+    if balance is not None and total_credits:
+        try:
+            pct_remaining = (float(balance) / float(total_credits)) * 100.0
+            if pct_remaining <= 10:
+                return "critical"
+            if pct_remaining <= 25:
+                return "warn"
+        except Exception:
+            pass
     if balance is not None:
         if balance <= 2:
             return "critical"
@@ -924,6 +934,25 @@ async def balance():
     """
     _reload_config_from_disk()
     balances = await balance_checker.check_balances(reader)
+    snapshots = balance_poller.get_latest_snapshots()
+
+    snapshot_aliases = {
+        "anthropic": ["anthropic"],
+        "elevenlabs": ["elevenlabs"],
+        "codex_cli": ["codex_cli", "openclaw"],
+        "moonshot": ["moonshot"],
+        "minimax": ["minimax", "mini_max", "minimaxai"],
+    }
+    for snapshot_provider, snapshot in snapshots.items():
+        scrape_error = snapshot.get("error")
+        aliases = snapshot_aliases.get(snapshot_provider, [snapshot_provider])
+        attached = False
+        for alias in aliases:
+            if alias in balances:
+                balances[alias]["scrape_error"] = scrape_error
+                attached = True
+        if not attached:
+            balances.setdefault(snapshot_provider, {})["scrape_error"] = scrape_error
 
     # Attach ledger history for any provider that has one
     balance_cfg = CONFIG.get("balance", {})
@@ -1107,15 +1136,20 @@ async def resources():
 
         is_window_based = provider_key in {"anthropic", "codex_cli"}
         extra_value = round(used_1w, 2)
+        display_name = provider_def["display_name"]
+        tier = snapshot.get("tier")
+        total_credits = snapshot.get("total_credits")
         if provider_key == "elevenlabs":
             # ElevenLabs card is balance-based: display current credits only.
             bal = snapshot.get("balance_amount")
             if bal is not None:
                 extra_value = round(float(bal), 2)
+            if tier:
+                display_name = f"ElevenLabs ({tier})"
 
         response_providers[provider_key] = {
             "provider": provider_key,
-            "display_name": provider_def["display_name"],
+            "display_name": display_name,
             "status": _resource_status(snapshot) if snapshot else "warn",
             "age_seconds": age_seconds,
             "windows": {
@@ -1135,7 +1169,10 @@ async def resources():
             "extra_usage": {
                 "unit": provider_def["unit"],
                 "value": extra_value,
+                "total": round(float(total_credits), 2) if total_credits is not None else None,
             },
+            "tier": tier,
+            "total_credits": round(float(total_credits), 2) if total_credits is not None else None,
             "pricing_notes": provider_def.get("pricing_notes"),
             "error": snapshot.get("error") if snapshot else None,
         }

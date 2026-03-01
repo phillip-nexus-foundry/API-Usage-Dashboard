@@ -493,14 +493,20 @@ function renderResources() {
 
     for (const item of providers) {
         const hasWindows = !!item.windows;
+        const isElevenLabs = item.provider === 'elevenlabs';
         const w5h = item.windows?.five_hour || { used: 0, limit: 0, percent: 0 };
         const w1w = item.windows?.one_week || { used: 0, limit: 0, percent: 0 };
         const p5h = Math.max(0, Math.min(100, Number(w5h.percent || 0)));
         const p1w = Math.max(0, Math.min(100, Number(w1w.percent || 0)));
+        const remainingCredits = Number(item.extra_usage?.value || 0);
+        const totalCredits = Number(item.total_credits ?? item.extra_usage?.total ?? 0);
+        const hasCreditProgress = isElevenLabs && totalCredits > 0;
+        const remainingPct = hasCreditProgress ? Math.max(0, Math.min(100, (remainingCredits / totalCredits) * 100)) : 0;
         const age = item.age_seconds !== null && item.age_seconds !== undefined ? `${Math.floor(item.age_seconds / 60)}m ago` : 'n/a';
         const error = item.error ? `<div class="resource-error">${item.error}</div>` : '';
         const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
         const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
+        const creditsStatusClass = remainingPct <= 10 ? 'critical' : remainingPct <= 25 ? 'warn' : 'ok';
         const windowsMarkup = hasWindows ? `
             <div class="resource-meter">
                 <div class="resource-meter-head">
@@ -520,7 +526,19 @@ function renderResources() {
                     <div class="resource-meter-fill status-${statusClass1w}" style="width:${p1w}%"></div>
                 </div>
             </div>
+        ` : hasCreditProgress ? `
+            <div class="resource-meter">
+                <div class="resource-meter-head">
+                    <span>${Math.round(remainingCredits).toLocaleString()} credits</span>
+                    <span>${Math.round(totalCredits).toLocaleString()} total</span>
+                </div>
+                <div class="resource-meter-track">
+                    <div class="resource-meter-fill status-${creditsStatusClass}" style="width:${remainingPct}%"></div>
+                </div>
+            </div>
         ` : '';
+        const extraLabel = isElevenLabs ? '' : 'Extra Usage: ';
+        const extraMarkup = hasCreditProgress ? '' : `<div class="resource-extra">${extraLabel}${formatExtraUsage(item)}</div>`;
 
         const card = document.createElement('div');
         card.className = 'resource-item';
@@ -530,7 +548,7 @@ function renderResources() {
                 <span>${item.display_name || item.provider}</span>
             </div>
             ${windowsMarkup}
-            <div class="resource-extra">${formatExtraUsage(item)}</div>
+            ${extraMarkup}
             <div class="resource-meta">Updated ${age}</div>
             ${error}
         `;
@@ -748,6 +766,10 @@ function renderBalance() {
                     </div></div>`;
                 }
             }
+        }
+
+        if (data.scrape_error) {
+            html += `<div class="balance-error">${data.scrape_error}</div>`;
         }
 
         card.innerHTML = html;
