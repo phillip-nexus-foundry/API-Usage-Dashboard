@@ -178,8 +178,8 @@ class OpenClawReader:
             logger.warning(f"Sessions directory does not exist: {self.sessions_dir}")
             return
         
-        # Get all JSONL files (including .jsonl.reset.*)
-        jsonl_files = list(sessions_path.glob("*.jsonl")) + list(sessions_path.glob("*.jsonl.reset.*"))
+        # Get all JSONL files (including .jsonl.reset.* and .jsonl.deleted.*)
+        jsonl_files = (list(sessions_path.glob("*.jsonl")) + list(sessions_path.glob("*.jsonl.reset.*")) + list(sessions_path.glob("*.jsonl.deleted.*")))
         
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
