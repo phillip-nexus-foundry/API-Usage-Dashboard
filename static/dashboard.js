@@ -69,7 +69,7 @@ let tsEndMs = loadState('tsEndMs', Date.now());
 let tsWindowMs = loadState('tsWindowMs', null);
 
 // If saved tsEndMs is stale (> 1 hour old), reset to now
-if (Date.now() - tsEndMs > 3600000) tsEndMs = Date.now();
+if (Date.now() - tsEndMs > 300000) tsEndMs = Date.now();
 
 document.addEventListener('DOMContentLoaded', () => {
     restoreUIState();
