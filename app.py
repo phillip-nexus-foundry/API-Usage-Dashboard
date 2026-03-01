@@ -1099,8 +1099,8 @@ async def resources():
         used_5h = _to_provider_units(provider_def["unit"], usage_5h["cost"], usage_5h["calls"], provider_key)
         used_1w = _to_provider_units(provider_def["unit"], usage_1w["cost"], usage_1w["calls"], provider_key)
 
-        limit_5h = float(provider_def["window_limits"]["five_hour"])
-        limit_1w = float(provider_def["window_limits"]["one_week"])
+        limit_5h = float(provider_def.get("window_limits", {}).get("five_hour", 0))
+        limit_1w = float(provider_def.get("window_limits", {}).get("one_week", 0))
         snapshot = snapshots.get(provider_key, {})
         ts = snapshot.get("timestamp")
         age_seconds = max(0, (now_ms - int(ts)) // 1000) if ts else None
