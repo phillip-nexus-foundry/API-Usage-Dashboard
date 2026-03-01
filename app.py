@@ -1052,7 +1052,7 @@ async def resources():
     }
 
     now_ms = int(_utc_now().timestamp() * 1000)
-    # five-hour window removed - only weekly/monthly now
+    five_hour_start = now_ms - (5 * 60 * 60 * 1000)  # 5 hours ago
     one_week_start = now_ms - (7 * 24 * 60 * 60 * 1000)
     snapshots = balance_poller.get_latest_snapshots(list(provider_defs.keys()))
 
