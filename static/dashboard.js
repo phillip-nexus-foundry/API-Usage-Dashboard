@@ -1053,12 +1053,7 @@ function renderTokenTimeSeries() {
     // Per-provider datasets (hidden by default) when "All Providers" is active
     const providerFilter = document.getElementById('filterProvider').value;
     if (!providerFilter) {
-        // Only include providers that have accrued cost
-        const providerNames = Object.keys(providerTokens).filter(prov => {
-            const provData = providerTokens[prov];
-            const totalCost = Object.values(provData).reduce((s, v) => s + (v.cost || 0), 0);
-            return totalCost > 0;
-        }).sort();
+        const providerNames = Object.keys(providerTokens).sort((a, b) => a.localeCompare(b));
         providerNames.forEach((prov, i) => {
             const provData = providerTokens[prov];
             datasets.push({
@@ -1150,18 +1145,26 @@ function renderCostTimeSeries() {
     const rawData = allData.timeseries.data;
     const data = fillEmptyBuckets(rawData, interval);
     const provCosts = allData.timeseries.provider_costs || {};
+    const providerTokens = allData.timeseries.provider_tokens || {};
     const ctx = document.getElementById('costTimeSeriesChart');
     const timestamps = data.map(d => d.timestamp);
     const labels = buildHierarchicalLabels(timestamps);
 
-    // Build stacked datasets per provider (exclude providers with no cost)
-    const providers = Object.keys(provCosts).filter(prov => {
-        const total = Object.values(provCosts[prov]).reduce((s,v) => s + v, 0);
-        return total > 0;
-    });
+    // Build stacked datasets per provider from all known providers.
+    // Prefer provider_costs when present, then fall back to provider_tokens[].cost.
+    const providers = Array.from(new Set([
+        ...Object.keys(providerTokens),
+        ...Object.keys(provCosts),
+    ])).sort((a, b) => a.localeCompare(b));
     const datasets = providers.map(prov => ({
         label: prov,
-        data: timestamps.map(ts => provCosts[prov][ts] || 0),
+        data: timestamps.map(ts => {
+            const costFromProviderCosts = provCosts[prov] && typeof provCosts[prov][ts] === 'number'
+                ? provCosts[prov][ts]
+                : null;
+            if (costFromProviderCosts !== null) return costFromProviderCosts;
+            return (providerTokens[prov] && providerTokens[prov][ts] && providerTokens[prov][ts].cost) || 0;
+        }),
         backgroundColor: getProviderColor(prov),
     }));
 
