@@ -492,6 +492,7 @@ function renderResources() {
     };
 
     for (const item of providers) {
+        const hasWindows = !!item.windows;
         const w5h = item.windows?.five_hour || { used: 0, limit: 0, percent: 0 };
         const w1w = item.windows?.one_week || { used: 0, limit: 0, percent: 0 };
         const p5h = Math.max(0, Math.min(100, Number(w5h.percent || 0)));
@@ -500,14 +501,7 @@ function renderResources() {
         const error = item.error ? `<div class="resource-error">${item.error}</div>` : '';
         const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
         const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
-
-        const card = document.createElement('div');
-        card.className = 'resource-item';
-        card.innerHTML = `
-            <div class="resource-title">
-                <span class="provider-dot" style="background:${getProviderColor(item.provider)}"></span>
-                <span>${item.display_name || item.provider}</span>
-            </div>
+        const windowsMarkup = hasWindows ? `
             <div class="resource-meter">
                 <div class="resource-meter-head">
                     <span>5 hr</span>
@@ -526,6 +520,16 @@ function renderResources() {
                     <div class="resource-meter-fill status-${statusClass1w}" style="width:${p1w}%"></div>
                 </div>
             </div>
+        ` : '';
+
+        const card = document.createElement('div');
+        card.className = 'resource-item';
+        card.innerHTML = `
+            <div class="resource-title">
+                <span class="provider-dot" style="background:${getProviderColor(item.provider)}"></span>
+                <span>${item.display_name || item.provider}</span>
+            </div>
+            ${windowsMarkup}
             <div class="resource-extra">${formatExtraUsage(item)}</div>
             <div class="resource-meta">Updated ${age}</div>
             ${error}

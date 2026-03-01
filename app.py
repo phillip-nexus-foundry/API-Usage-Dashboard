@@ -1105,6 +1105,14 @@ async def resources():
         ts = snapshot.get("timestamp")
         age_seconds = max(0, (now_ms - int(ts)) // 1000) if ts else None
 
+        is_window_based = provider_key in {"anthropic", "codex_cli"}
+        extra_value = round(used_1w, 2)
+        if provider_key == "elevenlabs":
+            # ElevenLabs card is balance-based: display current credits only.
+            bal = snapshot.get("balance_amount")
+            if bal is not None:
+                extra_value = round(float(bal), 2)
+
         response_providers[provider_key] = {
             "provider": provider_key,
             "display_name": provider_def["display_name"],
@@ -1123,10 +1131,10 @@ async def resources():
                     "limit": round(limit_1w, 2),
                     "percent": _pct(used_1w, limit_1w),
                 },
-            },
+            } if is_window_based else None,
             "extra_usage": {
                 "unit": provider_def["unit"],
-                "value": round(used_1w, 2),
+                "value": extra_value,
             },
             "pricing_notes": provider_def.get("pricing_notes"),
             "error": snapshot.get("error") if snapshot else None,
