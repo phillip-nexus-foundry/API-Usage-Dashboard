@@ -1,6 +1,11 @@
 server:
   host: 127.0.0.1
   port: 8050
+# Database: PostgreSQL (via Docker) or SQLite fallback
+# To use Postgres: docker compose up -d postgres
+# To use SQLite: comment out database_url (uses dashboard.db)
+database_url: postgresql://dashboard:dashboard_local@localhost:5432/api_usage_dashboard
+# database_path: dashboard.db  # SQLite fallback
 sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
 claude_code_tier: pro
 claude_extra_usage_limit: 25.0

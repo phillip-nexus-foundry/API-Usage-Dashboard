@@ -1,0 +1,17 @@
+[0228/192104.976:INFO:CONSOLE:4] "[2026-03-01T03:21:04.972Z]  @firebase/firestore: Firestore (11.2.0): You are overriding the original host. If you did not intend to override your settings, use {merge: true}.", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.672:INFO:CONSOLE:4] "UET GTM inherited consent ad_storage  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.674:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.676:INFO:CONSOLE:4] "UET GTM inherited consent ad_personalization  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.677:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.678:INFO:CONSOLE:4] "UET GTM inherited consent ad_user_data  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.679:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.680:INFO:CONSOLE:4] "UET GTM listening for consent updates", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.689:INFO:CONSOLE:4] "UET GTM inherited consent ad_storage  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.690:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.691:INFO:CONSOLE:4] "UET GTM inherited consent ad_personalization  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.692:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.694:INFO:CONSOLE:4] "UET GTM inherited consent ad_user_data  =  granted", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.695:INFO:CONSOLE:4] "UET GTM updating consent: [object Object]", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.696:INFO:CONSOLE:4] "UET GTM listening for consent updates", source: https://elevenlabs.io/app_assets/_next/static/chunks/11479-e8cc066a8794c619.js (4)
+[0228/192106.888:ERROR:content\public\browser\web_contents_delegate.cc:302] WebContentsDelegate::CheckMediaAccessPermission: Not supported.
+[0228/192106.888:ERROR:content\public\browser\web_contents_delegate.cc:302] WebContentsDelegate::CheckMediaAccessPermission: Not supported.

@@ -1,0 +1,14 @@
+2026/02/28-19:21:04.984 3770 Reusing MANIFEST C:\Users\AI-Agents\.openclaw\projects\API-Useage-Dashboard\browser_profiles\elevenlabs\Default\IndexedDB\https_elevenlabs.io_0.indexeddb.leveldb/MANIFEST-000001
+2026/02/28-19:21:04.985 3770 Recovering log #86
+2026/02/28-19:21:04.985 3770 Reusing old log C:\Users\AI-Agents\.openclaw\projects\API-Useage-Dashboard\browser_profiles\elevenlabs\Default\IndexedDB\https_elevenlabs.io_0.indexeddb.leveldb/000086.log 
+2026/02/28-19:21:04.986 3770 Delete type=2 #84
+2026/02/28-19:21:05.187 5310 Level-0 table #91: started
+2026/02/28-19:21:05.204 5310 Level-0 table #91: 930 bytes OK
+2026/02/28-19:21:05.205 5310 Delete type=0 #86
+2026/02/28-19:21:05.206 3770 Manual compaction at level-0 from '\x00\x1c\x00\x00\x00' @ 72057594037927935 : 1 .. '\x00\x1d\x00\x00\x00' @ 0 : 0; will stop at '\x00\x1c\x00\x00\x05' @ 985 : 1
+2026/02/28-19:21:05.207 3770 Compacting 1@0 + 1@1 files
+2026/02/28-19:21:05.222 3770 Generated table #92@0: 99 keys, 1843 bytes
+2026/02/28-19:21:05.222 3770 Compacted 1@0 + 1@1 files => 1843 bytes
+2026/02/28-19:21:05.223 3770 compacted to: files[ 0 1 1 0 0 0 0 ]
+2026/02/28-19:21:05.224 3770 Delete type=2 #91
+2026/02/28-19:21:05.225 3770 Manual compaction at level-0 from '\x00\x1c\x00\x00\x05' @ 985 : 1 .. '\x00\x1d\x00\x00\x00' @ 0 : 0; will stop at (end)

@@ -1,6 +1,24 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: api-dashboard-postgres
+    ports:
+      - "127.0.0.1:5432:5432"
+    environment:
+      POSTGRES_DB: api_usage_dashboard
+      POSTGRES_USER: dashboard
+      POSTGRES_PASSWORD: dashboard_local
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dashboard -d api_usage_dashboard"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
   dashboard:
     build: .
     container_name: api-usage-dashboard
@@ -10,6 +28,10 @@ services:
       - ~/.openclaw:/root/.openclaw:ro
     environment:
       - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+      - DATABASE_URL=postgresql://dashboard:dashboard_local@postgres:5432/api_usage_dashboard
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   # Optional: Prometheus + Grafana stack (enable with --profile full)
@@ -39,5 +61,6 @@ services:
     restart: unless-stopped
 
 volumes:
+  pgdata:
   prometheus_data:
   grafana_data:
