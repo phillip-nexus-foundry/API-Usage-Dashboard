@@ -1019,7 +1019,7 @@ def _get_claude_code_tier_display() -> str:
 
 @app.get("/api/resources")
 async def resources():
-    """Resource availability cards with 5-hour and 1-week usage windows."""
+    """Resource availability cards with usage windows matching actual provider limits."""
     _reload_config_from_disk()
     # Balance-based providers are excluded from Resource Availability.
     # This section only shows providers with RPM/TPM rate limits (window-based).
@@ -1029,19 +1029,19 @@ async def resources():
         "anthropic": {
             "display_name": _get_claude_code_tier_display(),
             "usage_provider_aliases": ["anthropic"],
-            "window_limits": {"five_hour": 3.00, "one_week": 20.00},
+            "window_limits": {"one_week": 20.00},
             "unit": "usd",
         },
         "elevenlabs": {
             "display_name": "ElevenLabs",
             "usage_provider_aliases": ["elevenlabs"],
-            "window_limits": {"five_hour": 600, "one_week": 3000},
+            "window_limits": {"one_month": 100000},
             "unit": "credits",
         },
         "codex_cli": {
             "display_name": "Codex CLI",
             "usage_provider_aliases": ["openclaw", "codex_cli"],
-            "window_limits": {"five_hour": 250, "one_week": 1000},
+            "window_limits": {},
             "unit": "credits",
             "pricing_notes": {
                 "minimum_purchase": "1,000 credits per purchase",
@@ -1052,7 +1052,7 @@ async def resources():
     }
 
     now_ms = int(_utc_now().timestamp() * 1000)
-    five_hour_start = now_ms - (5 * 60 * 60 * 1000)
+    # five-hour window removed - only weekly/monthly now
     one_week_start = now_ms - (7 * 24 * 60 * 60 * 1000)
     snapshots = balance_poller.get_latest_snapshots(list(provider_defs.keys()))
 
@@ -1098,11 +1098,6 @@ async def resources():
         usage_1w = _window_usage(provider_def["usage_provider_aliases"], one_week_start)
         used_5h = _to_provider_units(provider_def["unit"], usage_5h["cost"], usage_5h["calls"], provider_key)
         used_1w = _to_provider_units(provider_def["unit"], usage_1w["cost"], usage_1w["calls"], provider_key)
-
-        if provider_key == "codex_cli" and used_5h == 0 and used_1w == 0:
-            # Explicit placeholder until Codex CLI records are persisted directly.
-            used_5h = 80.0
-            used_1w = 320.0
 
         limit_5h = float(provider_def["window_limits"]["five_hour"])
         limit_1w = float(provider_def["window_limits"]["one_week"])
