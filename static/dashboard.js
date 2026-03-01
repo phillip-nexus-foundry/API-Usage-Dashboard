@@ -1053,7 +1053,14 @@ function renderTokenTimeSeries() {
     // Per-provider datasets (hidden by default) when "All Providers" is active
     const providerFilter = document.getElementById('filterProvider').value;
     if (!providerFilter) {
-        const providerNames = Object.keys(providerTokens).sort((a, b) => a.localeCompare(b));
+        const providerNames = Object.keys(providerTokens)
+            .filter(prov => {
+                const totalCost = Object.values(providerTokens[prov] || {}).reduce((sum, bucket) => (
+                    sum + ((bucket && typeof bucket.cost === 'number') ? bucket.cost : 0)
+                ), 0);
+                return totalCost > 0;
+            })
+            .sort((a, b) => a.localeCompare(b));
         providerNames.forEach((prov, i) => {
             const provData = providerTokens[prov];
             datasets.push({
@@ -1155,7 +1162,17 @@ function renderCostTimeSeries() {
     const providers = Array.from(new Set([
         ...Object.keys(providerTokens),
         ...Object.keys(provCosts),
-    ])).sort((a, b) => a.localeCompare(b));
+    ]))
+        .filter(prov => {
+            const totalFromProviderCosts = Object.values(provCosts[prov] || {}).reduce((sum, val) => (
+                sum + (typeof val === 'number' ? val : 0)
+            ), 0);
+            const totalFromProviderTokens = Object.values(providerTokens[prov] || {}).reduce((sum, bucket) => (
+                sum + ((bucket && typeof bucket.cost === 'number') ? bucket.cost : 0)
+            ), 0);
+            return totalFromProviderCosts > 0 || totalFromProviderTokens > 0;
+        })
+        .sort((a, b) => a.localeCompare(b));
     const datasets = providers.map(prov => ({
         label: prov,
         data: timestamps.map(ts => {
