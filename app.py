@@ -1120,6 +1120,57 @@ async def resources():
     show_scrape_errors = bool(CONFIG.get("show_scrape_errors", False))
     snapshots = balance_poller.get_latest_snapshots(list(provider_defs.keys()))
 
+    def _find_last_good_window_scrape(provider_key: str) -> Optional[Dict[str, Any]]:
+        """Return the latest historical scrape with usable window usage fields."""
+        usage_field_map = {
+            "anthropic": ("claude_usage", ("plan_usage_pct", "weekly_pct")),
+            "codex_cli": ("codex_usage", ("five_hour_remaining_pct", "weekly_remaining_pct")),
+        }
+        usage_info = usage_field_map.get(provider_key)
+        if not usage_info:
+            return None
+
+        payload_key, required_fields = usage_info
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT raw_response
+                FROM resource_snapshots
+                WHERE provider = ?
+                ORDER BY timestamp DESC
+                LIMIT 50
+                """,
+                (provider_key,),
+            )
+            rows = cursor.fetchall()
+
+        candidates: List[Dict[str, Any]] = []
+        # Skip the latest row because it matches `snapshot` and may contain nulls.
+        for idx, (raw_response,) in enumerate(rows):
+            if idx == 0 or not raw_response:
+                continue
+            try:
+                parsed = json.loads(raw_response)
+            except Exception:
+                continue
+            if not isinstance(parsed, dict):
+                continue
+            payload = parsed.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            usage_payload = payload.get(payload_key)
+            if isinstance(usage_payload, dict):
+                candidates.append(usage_payload)
+
+        for usage_payload in candidates:
+            if all(usage_payload.get(field) is not None for field in required_fields):
+                return usage_payload
+        for usage_payload in candidates:
+            if any(usage_payload.get(field) is not None for field in required_fields):
+                return usage_payload
+        return None
+
     def _window_usage(provider_aliases: List[str], since_ms: int) -> Dict[str, Any]:
         placeholders = ",".join("?" * len(provider_aliases))
         params: List[Any] = [*provider_aliases, since_ms]
@@ -1521,6 +1572,34 @@ async def cost_daily(
         "truncated": len(daily) >= row_limit,
         "configured_providers": _configured_providers(),
         "configured_models": _configured_models(),
+    }
+
+
+@app.get("/api/today-cost")
+async def today_cost():
+    """
+    Total cost across all providers since local midnight.
+    """
+    now_local = datetime.now().astimezone()
+    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_ms = int(midnight_local.timestamp() * 1000)
+
+    with sqlite3.connect(reader.db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COALESCE(SUM(cost_total), 0.0)
+            FROM records
+            WHERE timestamp >= ?
+            """,
+            (midnight_ms,),
+        )
+        total_cost = float(cursor.fetchone()[0] or 0.0)
+
+    return {
+        "today_cost": round(total_cost, 6),
+        "start_of_day": midnight_local.isoformat(),
+        "timestamp": _utc_now().isoformat().replace("+00:00", "Z"),
     }
 
 

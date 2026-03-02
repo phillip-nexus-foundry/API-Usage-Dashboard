@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_DB: api_usage_dashboard
       POSTGRES_USER: dashboard
-      POSTGRES_PASSWORD: dashboard_local
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dashboard_local}
     volumes:
       - pgdata:/var/lib/postgresql/data
     restart: unless-stopped
@@ -53,7 +53,7 @@ services:
     ports:
       - "127.0.0.1:3000:3000"
     environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
     volumes:
       - grafana_data:/var/lib/grafana
     restart: unless-stopped

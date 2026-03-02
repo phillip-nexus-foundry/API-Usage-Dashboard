@@ -286,6 +286,7 @@ th.sorted-desc::after {
     gap: 12px;
     margin-bottom: 16px;
     flex-wrap: wrap;
+    align-items: center;
 }
 
 .filter-group {
@@ -313,6 +314,36 @@ th.sorted-desc::after {
 .filter-group select:focus {
     outline: none;
     border-color: var(--accent-blue);
+}
+
+.today-cost-panel {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 2px;
+    min-width: 240px;
+    margin-left: 8px;
+    padding: 8px 14px;
+    border-radius: 10px;
+    border: 1px solid rgba(210, 153, 34, 0.55);
+    background: linear-gradient(180deg, rgba(210, 153, 34, 0.2) 0%, rgba(210, 153, 34, 0.08) 100%);
+    box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.18) inset;
+}
+
+.today-cost-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: #f2cc60;
+}
+
+.today-cost-value {
+    font-size: 30px;
+    line-height: 1.1;
+    font-weight: 700;
+    color: #f5d36c;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 0 10px rgba(210, 153, 34, 0.2);
 }
 
 /* Status indicators */
@@ -1172,9 +1203,14 @@ th.sorted-desc::after {
     .filter-group {
         width: 100%;
     }
-    
+
     .filter-group select {
         width: 100%;
+    }
+
+    .today-cost-panel {
+        width: 100%;
+        margin-left: 0;
     }
     
     .btn {

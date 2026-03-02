@@ -22,7 +22,7 @@ function getProviderColor(provider) {
     return providerColorMap[provider];
 }
 
-let allData = { summary:null, timeseries:null, calls:null, models:null, tools:null, balance:null, resources:null, evals:null, costDaily:null, costProjection:null, ratelimits:null, spendlimits:null };
+let allData = { summary:null, timeseries:null, calls:null, models:null, tools:null, balance:null, resources:null, evals:null, costDaily:null, costProjection:null, todayCost:null, ratelimits:null, spendlimits:null };
 let unfilteredMeta = { providers:[], models:[] };
 let chartInstances = {};
 
@@ -405,7 +405,7 @@ async function loadData() {
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
         const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
-        const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits] = await Promise.all([
+        const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,todayCost,ratelimits,spendlimits] = await Promise.all([
             fetch(`/api/summary?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/summary?_=1').then(r=>r.json()),  // unfiltered for earliest timestamp
             fetch(`/api/timeseries?interval=${interval}${tsRange}`).then(r=>r.json()),
@@ -417,10 +417,11 @@ async function loadData() {
             safeFetch('/api/evals', {evals:[]}),
             fetch(`/api/cost/daily?_=1${kpiRange}`).then(r=>r.json()),
             safeFetch(`/api/cost/projection?_=1${kpiRange}`, null),
+            safeFetch('/api/today-cost', {today_cost: 0}),
             safeFetch('/api/ratelimits', {entries:[]}),
             safeFetch('/api/spendlimits', {entries:[]}),
         ]);
-        allData = {summary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits};
+        allData = {summary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,todayCost,ratelimits,spendlimits};
         absoluteEarliest = unfilteredSummary.earliest_timestamp || 0;
         unfilteredMeta.providers = (unfilteredSummary.by_provider||[]).map(p=>p.provider);
         unfilteredMeta.models = (unfilteredSummary.by_model||[]).map(m=>m.model);
@@ -438,7 +439,7 @@ async function loadFilteredData() {
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
         const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
-        const [summary,timeseries,calls,models,tools,costDaily,costProjection,ratelimits,balance] = await Promise.all([
+        const [summary,timeseries,calls,models,tools,costDaily,costProjection,todayCost,ratelimits,balance] = await Promise.all([
             fetch(`/api/summary?_=1${fq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/timeseries?interval=${interval}${fq}${tsRange}`).then(r=>r.json()),
             fetch(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${fq}${rq}${kpiRange}`).then(r=>r.json()),
@@ -446,18 +447,20 @@ async function loadFilteredData() {
             fetch(`/api/tools?_=1${fq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/cost/daily?_=1${fq}${kpiRange}`).then(r=>r.json()),
             safeFetch(`/api/cost/projection?_=1${fq}${kpiRange}`, null),
+            safeFetch('/api/today-cost', {today_cost: 0}),
             safeFetch('/api/ratelimits', {entries:[]}),
             fetch('/api/balance').then(r=>r.json()),
         ]);
         allData.summary=summary; allData.timeseries=timeseries; allData.calls=calls;
         allData.models=models; allData.tools=tools; allData.costDaily=costDaily; allData.costProjection=costProjection;
-        allData.ratelimits=ratelimits; allData.balance=balance;
+        allData.todayCost=todayCost; allData.ratelimits=ratelimits; allData.balance=balance;
         await renderDashboard();
     } catch(e) { showToast('Filter failed: '+e.message,'error'); }
 }
 
 async function renderDashboard() {
     populateFilters();
+    renderTodayCost();
     renderBalance();
     renderResources();
     await renderKPIs();
@@ -466,6 +469,17 @@ async function renderDashboard() {
     renderRateLimits();
     renderSpendLimits();
     renderCallLog();
+}
+
+function renderTodayCost() {
+    const el = document.getElementById('todayCostValue');
+    if (!el) return;
+    const cost = Number(allData?.todayCost?.today_cost);
+    if (!Number.isFinite(cost)) {
+        el.textContent = '$0.00';
+        return;
+    }
+    el.textContent = `$${cost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 function renderResources() {

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>API Usage Dashboard</title>
-    <link rel="stylesheet" href="/static/style.css?v=16">
+    <link rel="stylesheet" href="/static/style.css?v=17">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
 </head>
@@ -40,6 +40,10 @@
                     <option value="week">Week</option>
                     <option value="month">Month</option>
                 </select>
+            </div>
+            <div class="today-cost-panel" id="todayCostPanel" aria-live="polite">
+                <span class="today-cost-label">Total Cost Today</span>
+                <span class="today-cost-value" id="todayCostValue">$0.00</span>
             </div>
         </div>
 
@@ -246,6 +250,6 @@
     </div>
 
     <div class="toast-container" id="toastContainer"></div>
-    <script src="/static/dashboard.js?v=13"></script>
+    <script src="/static/dashboard.js?v=14"></script>
 </body>
 </html>
