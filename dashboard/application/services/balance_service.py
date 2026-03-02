@@ -146,10 +146,22 @@ class BalanceService:
 
         total_deposits = sum(e.get("amount", 0) for e in ledger)
 
-        # Check for verified override
+        # Check for verified override (use as baseline + incremental DB cost since calibration)
         if cfg.get("verified_usage_cost") is not None:
             try:
-                usage_cost = float(cfg["verified_usage_cost"])
+                baseline_cost = float(cfg["verified_usage_cost"])
+                incremental = 0.0
+                cal_date = cfg.get("verified_usage_date")
+                if cal_date:
+                    from datetime import datetime as dt, timedelta
+                    # Interpret calibration date in system local timezone (not UTC),
+                    # since the user calibrated in their local time. Use start of
+                    # NEXT local day to avoid double-counting calibration day usage.
+                    local_tz = dt.now().astimezone().tzinfo
+                    cal_dt = dt.strptime(str(cal_date), "%Y-%m-%d").replace(tzinfo=local_tz) + timedelta(days=1)
+                    cal_ms = int(cal_dt.timestamp() * 1000)
+                    incremental = self._telemetry_repo.get_cost_since(provider_name, cal_ms)
+                usage_cost = round(baseline_cost + incremental, 6)
                 return {
                     "remaining": round(total_deposits - usage_cost, 2),
                     "total_deposits": total_deposits,
@@ -192,11 +204,7 @@ class BalanceService:
             proj_models = proj_cfg.get("models", [])
 
             # Get cost for project's models
-            proj_cost = 0.0
-            for model in proj_models:
-                proj_cost += self._telemetry_repo.get_total_cost_by_provider(model)
-            # Also check by model name directly
-            # (the telemetry_repo uses provider field, but we need model-based cost here)
+            proj_cost = self._telemetry_repo.get_total_cost_by_models(proj_models)
 
             proj_remaining = proj_deposits - proj_cost
 
@@ -231,6 +239,18 @@ class BalanceService:
             if api_result.remaining is not None:
                 remaining = api_result.remaining
                 balance_source = "api"
+                # Propagate API balance to project level for single-project providers
+                if len(projects_result) == 1:
+                    only_proj = next(iter(projects_result.values()))
+                    only_proj["remaining"] = round(remaining, 2)
+                    only_proj["cumulative_cost"] = round(total_deposits - remaining, 6)
+                    # Re-evaluate project status with API balance
+                    if remaining <= crit:
+                        only_proj["status"] = "critical"
+                    elif remaining <= warn:
+                        only_proj["status"] = "warn"
+                    else:
+                        only_proj["status"] = "ok"
 
         worst = "ok"
         for proj in projects_result.values():
@@ -282,6 +302,11 @@ class BalanceService:
             result["total_deposits"] = ledger_data.get("total_deposits", 0)
             result["cumulative_cost"] = ledger_data.get("cumulative_cost", 0)
             result["cost_source"] = ledger_data.get("cost_source", "computed")
+
+        # Include ledger entries so the frontend can render the deposits toggle
+        ledger = cfg.get("ledger", [])
+        if ledger:
+            result["ledger"] = ledger
 
         if reconciled.drift_pct is not None:
             result["drift_pct"] = round(reconciled.drift_pct, 2)

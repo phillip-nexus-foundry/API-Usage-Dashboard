@@ -112,15 +112,17 @@ def create_app() -> FastAPI:
         logger.warning(f"Legacy BalancePoller not available: {e}")
 
     # ========== PRESENTATION TIER ==========
-    from dashboard.presentation.routes import telemetry, balance, projection, system, resources
+    from dashboard.presentation.routes import telemetry, balance, projection, system, resources, ratelimits, spendlimits
     from dashboard.presentation.middleware import setup_middleware
 
     # Initialize route modules with dependencies
-    telemetry.init(telemetry_repo, config)
+    telemetry.init(telemetry_repo, config, balance_service=balance_service)
     balance.init(balance_service, balance_repo, config, str(CONFIG_PATH))
     projection.init(projection_service, telemetry_repo, config)
     system.init(config, db)
-    resources.init(config, balance_poller)
+    resources.init(config, balance_poller, db)
+    ratelimits.init(config, str(CONFIG_PATH), db)
+    spendlimits.init(config, str(CONFIG_PATH), db)
 
     # ========== LIFECYCLE ==========
     @asynccontextmanager
@@ -195,6 +197,8 @@ def create_app() -> FastAPI:
     app.include_router(projection.router, prefix="/api")
     app.include_router(system.router, prefix="/api")
     app.include_router(resources.router, prefix="/api")
+    app.include_router(ratelimits.router, prefix="/api")
+    app.include_router(spendlimits.router, prefix="/api")
 
     # Static files - serve from presentation/static/ with fallback to legacy static/
     static_dir = Path(__file__).parent / "presentation" / "static"

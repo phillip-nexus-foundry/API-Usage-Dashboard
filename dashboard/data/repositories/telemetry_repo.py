@@ -200,18 +200,48 @@ class SQLAlchemyTelemetryRepo:
                 q = q.filter(Record.provider == provider)
 
             q = q.group_by("bucket", Record.provider).order_by(text("bucket"))
-            return [
-                {
-                    "bucket": str(row.bucket),
+            results = []
+            for row in q.all():
+                bucket_str = str(row.bucket)
+                # Convert bucket to epoch ms for frontend compatibility
+                try:
+                    from datetime import datetime as _dt
+                    if self._db.is_sqlite:
+                        # SQLite buckets are formatted strings like "2026-03-01 18:00"
+                        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:00", "%Y-%m-%d", "%Y-%m"):
+                            try:
+                                ts = int(_dt.strptime(bucket_str, fmt).replace(
+                                    tzinfo=__import__('datetime').timezone.utc
+                                ).timestamp() * 1000)
+                                break
+                            except ValueError:
+                                continue
+                        else:
+                            ts = 0
+                    else:
+                        # PostgreSQL buckets are timestamp strings like "2026-03-01 18:00:00+00:00"
+                        from datetime import datetime as _dt2, timezone as _tz
+                        bucket_dt = _dt2.fromisoformat(bucket_str)
+                        if bucket_dt.tzinfo is None:
+                            bucket_dt = bucket_dt.replace(tzinfo=_tz.utc)
+                        ts = int(bucket_dt.timestamp() * 1000)
+                except Exception:
+                    ts = 0
+                input_tok = int(row.input_tokens or 0)
+                output_tok = int(row.output_tokens or 0)
+                total_tokens = int(row.total_tokens or 0) or (input_tok + output_tok)
+                results.append({
+                    "bucket": bucket_str,
+                    "timestamp": ts,
                     "provider": row.provider,
                     "calls": int(row.calls or 0),
                     "cost": float(row.cost or 0),
-                    "input_tokens": int(row.input_tokens or 0),
-                    "output_tokens": int(row.output_tokens or 0),
-                    "total_tokens": int(row.total_tokens or 0),
-                }
-                for row in q.all()
-            ]
+                    "input_tokens": input_tok,
+                    "output_tokens": output_tok,
+                    "total_tokens": total_tokens,
+                    "tokens": total_tokens,
+                })
+            return results
 
     def get_sessions(self) -> list[dict]:
         with self._db.session() as session:
@@ -249,6 +279,8 @@ class SQLAlchemyTelemetryRepo:
                 func.count(Record.id).label("calls"),
                 func.sum(Record.cost_total).label("cost"),
                 func.sum(Record.tokens_total).label("tokens"),
+                func.avg(Record.cache_hit_ratio).label("avg_cache_hit_ratio"),
+                func.avg(case((Record.is_error == True, 1), else_=0)).label("error_rate"),
             ).group_by(Record.model, Record.provider)
             return [
                 {
@@ -257,6 +289,8 @@ class SQLAlchemyTelemetryRepo:
                     "calls": int(row.calls),
                     "cost": float(row.cost or 0),
                     "tokens": int(row.tokens or 0),
+                    "avg_cache_hit_ratio": float(row.avg_cache_hit_ratio or 0),
+                    "error_rate": float(row.error_rate or 0),
                 }
                 for row in q.all()
             ]
@@ -287,6 +321,27 @@ class SQLAlchemyTelemetryRepo:
             result = session.query(
                 func.sum(Record.cost_total)
             ).filter(Record.provider == provider).scalar()
+            return float(result or 0.0)
+
+    def get_total_cost_by_models(self, models: list[str]) -> float:
+        """Sum cost_total for records matching any of the given model names."""
+        if not models:
+            return 0.0
+        with self._db.session() as session:
+            result = session.query(
+                func.sum(Record.cost_total)
+            ).filter(Record.model.in_(models)).scalar()
+            return float(result or 0.0)
+
+    def get_cost_since(self, provider: str, since_ms: int) -> float:
+        """Sum cost_total for a provider since a given epoch-ms timestamp."""
+        with self._db.session() as session:
+            result = session.query(
+                func.sum(Record.cost_total)
+            ).filter(
+                Record.provider == provider,
+                Record.timestamp >= since_ms,
+            ).scalar()
             return float(result or 0.0)
 
     def _to_dict(self, record: Record) -> dict:

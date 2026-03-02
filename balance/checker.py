@@ -115,6 +115,12 @@ class BalanceChecker:
                 proj_deposits = sum(entry.get("amount", 0) for entry in ledger)
                 proj_models = proj_cfg.get("models", [])
                 proj_cost = self._get_models_cost(reader, proj_models) if proj_models else 0.0
+                # Allow verified_usage_cost override at project level (same as provider level)
+                if proj_cfg.get("verified_usage_cost") is not None:
+                    try:
+                        proj_cost = float(proj_cfg["verified_usage_cost"])
+                    except (TypeError, ValueError):
+                        pass
                 proj_remaining = proj_deposits - proj_cost
 
                 proj_status = "ok"

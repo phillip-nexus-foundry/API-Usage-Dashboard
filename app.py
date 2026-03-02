@@ -283,22 +283,9 @@ async def lifespan(_app: FastAPI):
         scheduler.add_job(
             _resource_poll_job,
             trigger="cron",
-            id="resource_poll_business_hours",
+            id="resource_poll_every_minute",
             replace_existing=True,
-            hour="7-21",
-            minute="*/15",
-            jitter=900,  # 15 minute base + up to 15 minute jitter
-            coalesce=True,
-            max_instances=1,
-        )
-        scheduler.add_job(
-            _resource_poll_job,
-            trigger="cron",
-            id="resource_poll_overnight",
-            replace_existing=True,
-            hour="0,2,4,6,22",
-            minute="0",
-            jitter=3600,  # 2 hour base + up to 1 hour jitter
+            minute="*",
             coalesce=True,
             max_instances=1,
         )
@@ -1041,9 +1028,13 @@ async def balance():
     balances = {k: v for k, v in balances.items() if k in configured_balance_providers}
 
     # Prefer latest scraped balances when available to keep cards live without API keys.
+    # Skip providers whose poller returns "api_only" (no browser scraping).
     for provider_name, provider_data in balances.items():
         snapshot = snapshots.get(provider_name)
         if not snapshot:
+            continue
+        snap_source = snapshot.get("balance_source")
+        if snap_source == "api_only":
             continue
         snap_balance = snapshot.get("balance_amount")
         if snap_balance is None:
@@ -1233,10 +1224,65 @@ async def resources():
 
         window_5h_meta = _window_reset_meta(usage_5h, 5 * 60 * 60 * 1000)
         window_1w_meta = _window_reset_meta(usage_1w, 7 * 24 * 60 * 60 * 1000)
+
+        # Use scraped window percentages from CDP for Claude Code and Codex
+        # instead of local telemetry (which doesn't have rate limit data).
+        scraped_pct_5h = None
+        scraped_pct_1w = None
+        scraped_reset_5h = None
+        scraped_reset_1w = None
+        raw_payload = (snapshot.get("raw_payload") or {}) if snapshot else {}
+
         if provider_key == "anthropic":
-            # Claude web usage windows are not present in local telemetry yet.
-            window_5h_meta = {"reset_at": None, "remaining_seconds": None}
-            window_1w_meta = {"reset_at": None, "remaining_seconds": None}
+            claude_usage = raw_payload.get("claude_usage") or {}
+            if isinstance(claude_usage, dict):
+                scraped_pct_5h = claude_usage.get("plan_usage_pct")
+                scraped_pct_1w = claude_usage.get("weekly_pct")
+                scraped_reset_5h = claude_usage.get("plan_usage_reset")
+                scraped_reset_1w = claude_usage.get("weekly_reset")
+            # If current scrape returned nulls, look back for last good values
+            if scraped_pct_5h is None or scraped_pct_1w is None:
+                last_good = _find_last_good_window_scrape(provider_key)
+                if last_good:
+                    if scraped_pct_5h is None:
+                        scraped_pct_5h = last_good.get("plan_usage_pct")
+                    if scraped_pct_1w is None:
+                        scraped_pct_1w = last_good.get("weekly_pct")
+                    if scraped_reset_5h is None:
+                        scraped_reset_5h = last_good.get("plan_usage_reset")
+                    if scraped_reset_1w is None:
+                        scraped_reset_1w = last_good.get("weekly_reset")
+        elif provider_key == "codex_cli":
+            codex_usage = raw_payload.get("codex_usage") or {}
+            if isinstance(codex_usage, dict):
+                # Codex reports "remaining" pct; convert to "used" pct
+                rem_5h = codex_usage.get("five_hour_remaining_pct")
+                rem_1w = codex_usage.get("weekly_remaining_pct")
+                if rem_5h is not None:
+                    scraped_pct_5h = 100 - int(rem_5h)
+                if rem_1w is not None:
+                    scraped_pct_1w = 100 - int(rem_1w)
+                scraped_reset_1w = codex_usage.get("weekly_reset")
+            # If current scrape returned nulls, look back for last good values
+            if scraped_pct_5h is None or scraped_pct_1w is None:
+                last_good = _find_last_good_window_scrape(provider_key)
+                if last_good:
+                    if scraped_pct_5h is None and last_good.get("five_hour_remaining_pct") is not None:
+                        scraped_pct_5h = 100 - int(last_good["five_hour_remaining_pct"])
+                    if scraped_pct_1w is None and last_good.get("weekly_remaining_pct") is not None:
+                        scraped_pct_1w = 100 - int(last_good["weekly_remaining_pct"])
+                    if scraped_reset_1w is None:
+                        scraped_reset_1w = last_good.get("weekly_reset")
+
+        # Prefer scraped percentages over local telemetry computation
+        pct_5h = float(scraped_pct_5h) if scraped_pct_5h is not None else _pct(used_5h, limit_5h)
+        pct_1w = float(scraped_pct_1w) if scraped_pct_1w is not None else _pct(used_1w, limit_1w)
+
+        # Use scraped reset text if available; clear telemetry-based meta
+        # for providers where local telemetry can't compute resets.
+        if provider_key in {"anthropic", "codex_cli"}:
+            window_5h_meta = {"reset_at": None, "remaining_seconds": None, "reset_text": scraped_reset_5h}
+            window_1w_meta = {"reset_at": None, "remaining_seconds": None, "reset_text": scraped_reset_1w}
 
         response_providers[provider_key] = {
             "provider": provider_key,
@@ -1248,17 +1294,19 @@ async def resources():
                     "label": "5 hr",
                     "used": round(used_5h, 2),
                     "limit": round(limit_5h, 2),
-                    "percent": _pct(used_5h, limit_5h),
+                    "percent": round(pct_5h, 1),
                     "reset_at": window_5h_meta["reset_at"],
                     "remaining_seconds": window_5h_meta["remaining_seconds"],
+                    "reset_text": window_5h_meta.get("reset_text"),
                 },
                 "one_week": {
                     "label": "1 wk",
                     "used": round(used_1w, 2),
                     "limit": round(limit_1w, 2),
-                    "percent": _pct(used_1w, limit_1w),
+                    "percent": round(pct_1w, 1),
                     "reset_at": window_1w_meta["reset_at"],
                     "remaining_seconds": window_1w_meta["remaining_seconds"],
+                    "reset_text": window_1w_meta.get("reset_text"),
                 },
             } if is_window_based else None,
             "extra_usage": {

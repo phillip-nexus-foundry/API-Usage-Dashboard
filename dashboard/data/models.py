@@ -5,7 +5,7 @@ pricing_history, provider_state.
 """
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, Integer, Float, String, Text, Boolean, DateTime,
+    Column, Integer, BigInteger, Float, String, Text, Boolean, DateTime,
     UniqueConstraint, Index
 )
 from sqlalchemy.orm import DeclarativeBase
@@ -27,7 +27,7 @@ class Record(Base):
     call_id = Column(String(128), unique=True, nullable=False)
     session_id = Column(String(128), nullable=False, index=True)
     parent_id = Column(String(128), nullable=True)
-    timestamp = Column(Integer, nullable=False, index=True)  # epoch ms
+    timestamp = Column(BigInteger, nullable=False, index=True)  # epoch ms
     timestamp_iso = Column(String(64), nullable=False)
     api = Column(String(64), nullable=False)
     provider = Column(String(64), nullable=False, index=True)
@@ -76,7 +76,7 @@ class FileIndex(Base):
     path = Column(String(1024), primary_key=True)
     mtime = Column(Float, nullable=False)
     record_count = Column(Integer, default=0)
-    parser_version = Column(String(32), nullable=True)
+    parser_version = Column(String(64), nullable=True)
 
     # NEW: Enhanced change detection
     size = Column(Integer, nullable=True)

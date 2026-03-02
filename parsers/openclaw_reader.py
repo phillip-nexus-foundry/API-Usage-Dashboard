@@ -250,7 +250,22 @@ class OpenClawReader:
             
             conn.commit()
     
-    def _parse_file(self, filepath: Path) -> List[TelemetryRecord]:
+    @staticmethod
+    def parse_file(filepath, start_line: int = 0) -> List[TelemetryRecord]:
+        """
+        Parse a single JSONL file (static entry point for ingestion service).
+
+        Args:
+            filepath: Path to the JSONL session file.
+            start_line: Line number to start parsing from (0-based, for incremental).
+
+        Returns list of TelemetryRecord objects.
+        """
+        reader = OpenClawReader.__new__(OpenClawReader)
+        reader.parse_errors = []
+        return reader._parse_file(Path(filepath), start_line=start_line)
+
+    def _parse_file(self, filepath: Path, start_line: int = 0) -> List[TelemetryRecord]:
         """
         Parse a single JSONL file.
         Returns list of TelemetryRecord objects.
@@ -261,21 +276,30 @@ class OpenClawReader:
         # Track last seen raw cacheWrite per (session_id, model) within this file parse.
         # OpenClaw can emit cumulative cacheWrite counters for Anthropic models.
         cache_write_state: Dict[tuple, int] = {}
-        
+
         with open(filepath, 'r', encoding='utf-8') as f:
             for line_num, line in enumerate(f, 1):
+                if line_num <= start_line:
+                    # Still need to track session_id from header
+                    try:
+                        obj = json.loads(line.strip())
+                        if obj.get("type") == "session":
+                            session_id = obj.get("id")
+                    except Exception:
+                        pass
+                    continue
                 try:
                     line = line.strip()
                     if not line:
                         continue
-                    
+
                     obj = json.loads(line)
-                    
+
                     # Line 0: session header
                     if obj.get("type") == "session":
                         session_id = obj.get("id")
                         continue
-                    
+
                     # Message line: extract usage data from assistant messages
                     if obj.get("type") == "message":
                         message = obj.get("message", {})
@@ -283,7 +307,7 @@ class OpenClawReader:
                             record = self._message_to_record(session_id, obj, filepath.stem, cache_write_state)
                             if record:
                                 records.append(record)
-                
+
                 except json.JSONDecodeError as e:
                     error = ParseError(str(filepath), line_num, f"JSON decode error: {e}")
                     self.parse_errors.append(error)
@@ -292,7 +316,7 @@ class OpenClawReader:
                     error = ParseError(str(filepath), line_num, str(e))
                     self.parse_errors.append(error)
                     logger.warning(f"{error}")
-        
+
         return records
     
     def _message_to_record(

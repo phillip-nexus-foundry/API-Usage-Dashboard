@@ -1,21 +1,17 @@
 server:
   host: 127.0.0.1
   port: 8050
-# Database: PostgreSQL (via Docker) or SQLite fallback
-# To use Postgres: docker compose up -d postgres
-# To use SQLite: comment out database_url (uses dashboard.db)
 database_url: postgresql://dashboard:dashboard_local@localhost:5432/api_usage_dashboard
-# database_path: dashboard.db  # SQLite fallback
 sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
 claude_code_tier: pro
 claude_extra_usage_limit: 25.0
 claude_usage_fallback:
   spend_used: 24.49
   spend_limit: 25.0
-  spend_reset_text: Mar 1
-  extra_usage_balance: 1.31
+  spend_reset_text: Apr 1
+  extra_usage_balance: 0.51
 scrape_error_stale_after_seconds: 900
-use_brave_cdp: false
+use_brave_cdp: true
 show_scrape_errors: false
 balance:
   anthropic:
@@ -26,10 +22,11 @@ balance:
     - date: '2026-02-27'
       amount: 30.0
       note: Tier 2 top up
-    verified_usage_cost: 33.8
-    verified_usage_note: Calibrated Feb 27 2026 against Claude site (USD 16.20 remaining
-      of USD 50; USD 33.80 used). Historical session files purged by OpenClaw, so
-      computed DB cost underreports and verified override is authoritative.
+    verified_usage_cost: 46.03
+    verified_usage_date: '2026-03-01'
+    verified_usage_note: Calibrated Mar 1 2026 against Anthropic console (USD 3.97
+      remaining of USD 50; USD 46.03 used). Verified override is authoritative since
+      historical session files were purged by OpenClaw.
     warn_threshold: 5.0
     critical_threshold: 2.0
   minimax:
@@ -37,10 +34,10 @@ balance:
     - date: '2026-02-27'
       amount: 25.0
       note: Initial Deposit
-    verified_usage_cost: 2.85
-    verified_usage_note: Recalibrated Feb 27 2026 to match provider balance (.15 remaining;
-      no new deposit, so cumulative usage is .85). This verified value is authoritative
-      for balance tracking.
+    verified_usage_cost: 10.2
+    verified_usage_date: '2026-03-01'
+    verified_usage_note: Calibrated Mar 1 2026 against MiniMax console (USD 14.80
+      remaining of USD 25; USD 10.20 used). Verified override is authoritative.
     warn_threshold: 5.0
     critical_threshold: 2.0
   moonshot:
@@ -53,6 +50,10 @@ balance:
         models:
         - kimi-k2.5
         - moonshot-v1-8k
+        verified_usage_cost: 82.93
+        verified_usage_date: '2026-03-02'
+        verified_usage_note: Calibrated Mar 2 2026 against Moonshot console ($12.07
+          remaining of $95 total deposits).
         ledger:
         - date: '2026-02-01'
           amount: 20.0

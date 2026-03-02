@@ -13,12 +13,14 @@ router = APIRouter(tags=["telemetry"])
 # These will be injected by the app factory
 _telemetry_repo = None
 _config = None
+_balance_service = None
 
 
-def init(telemetry_repo, config):
-    global _telemetry_repo, _config
+def init(telemetry_repo, config, balance_service=None):
+    global _telemetry_repo, _config, _balance_service
     _telemetry_repo = telemetry_repo
     _config = config
+    _balance_service = balance_service
 
 
 def _configured_providers():
@@ -73,10 +75,16 @@ async def summary(
     by_provider.sort(key=lambda x: (-x["calls"], x["provider"]))
     by_model.sort(key=lambda x: (-x["calls"], x["model"]))
 
+    # Use authoritative balance-derived costs when available (no time filter).
+    # For filtered queries, fall back to raw DB sums.
+    total_cost = totals["cost"]
+    if not since and not until and not provider and not model:
+        total_cost = await _authoritative_total_cost(by_provider, totals["cost"])
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "total_calls": totals["calls"],
-        "total_cost": round(totals["cost"], 6),
+        "total_cost": round(total_cost, 6),
         "total_tokens": totals["tokens"],
         "error_rate": totals["error_rate"],
         "error_count": totals["errors"],
@@ -87,6 +95,77 @@ async def summary(
         "configured_providers": _configured_providers(),
         "configured_models": _configured_models(),
     }
+
+
+async def _authoritative_total_cost(by_provider: list, db_total: float) -> float:
+    """
+    Compute total cost using authoritative balance data (deposits - remaining)
+    for each configured provider, falling back to DB cost for unconfigured ones.
+    This ensures the summary total matches the Balance Tracker cards exactly.
+    """
+    if not _config:
+        return db_total
+
+    balance_cfg = _config.get("balance", {})
+    if not balance_cfg:
+        return db_total
+
+    total = 0.0
+    db_provider_costs = {p["provider"]: p["cost"] for p in by_provider}
+    accounted = set()
+
+    for prov_name, cfg in balance_cfg.items():
+        if not isinstance(cfg, dict):
+            continue
+
+        # Multi-project providers (e.g. Moonshot with API balance)
+        if cfg.get("projects"):
+            if _balance_service:
+                try:
+                    bal = await _balance_service.check_balance(prov_name)
+                    deposits = bal.get("total_deposits", 0)
+                    remaining = bal.get("remaining", deposits)
+                    auth_cost = deposits - remaining
+                    total += auth_cost
+                    for entry in by_provider:
+                        if entry["provider"] == prov_name:
+                            entry["cost"] = round(auth_cost, 6)
+                except Exception:
+                    total += db_provider_costs.get(prov_name, 0.0)
+            else:
+                total += db_provider_costs.get(prov_name, 0.0)
+            accounted.add(prov_name)
+            continue
+
+        # Single-ledger providers with verified_usage_cost
+        if cfg.get("verified_usage_cost") is not None:
+            baseline = float(cfg["verified_usage_cost"])
+            incremental = 0.0
+            cal_date = cfg.get("verified_usage_date")
+            if cal_date and _telemetry_repo:
+                from datetime import datetime as dt, timedelta
+                local_tz = dt.now().astimezone().tzinfo
+                cal_dt = dt.strptime(str(cal_date), "%Y-%m-%d").replace(tzinfo=local_tz) + timedelta(days=1)
+                cal_ms = int(cal_dt.timestamp() * 1000)
+                incremental = _telemetry_repo.get_cost_since(prov_name, cal_ms)
+            auth_cost = baseline + incremental
+            total += auth_cost
+            for entry in by_provider:
+                if entry["provider"] == prov_name:
+                    entry["cost"] = round(auth_cost, 6)
+            accounted.add(prov_name)
+            continue
+
+        # No authoritative source: use DB cost
+        total += db_provider_costs.get(prov_name, 0.0)
+        accounted.add(prov_name)
+
+    # Add any providers in DB but not in balance config
+    for prov_name, cost in db_provider_costs.items():
+        if prov_name not in accounted:
+            total += cost
+
+    return total
 
 
 @router.get("/timeseries")
@@ -105,18 +184,18 @@ async def timeseries(
         interval=interval, since=since, until=until, provider=provider
     )
 
-    # Build provider_costs and provider_tokens maps
+    # Build provider_costs and provider_tokens maps keyed by epoch ms
     provider_costs = {}
     provider_tokens = {}
     for row in data:
         prov = row["provider"]
-        bucket = row["bucket"]
+        ts = row["timestamp"]
         if prov not in provider_costs:
             provider_costs[prov] = {}
             provider_tokens[prov] = {}
-        provider_costs[prov][bucket] = row["cost"]
-        provider_tokens[prov][bucket] = {
-            "tokens": row["total_tokens"],
+        provider_costs[prov][ts] = row["cost"]
+        provider_tokens[prov][ts] = {
+            "tokens": row.get("tokens", row.get("total_tokens", 0)),
             "cost": row["cost"],
         }
 

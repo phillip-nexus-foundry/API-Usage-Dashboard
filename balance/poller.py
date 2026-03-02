@@ -1,6 +1,7 @@
 """
 Background balance polling and drift calibration.
 """
+import asyncio
 import json
 import os
 import logging
@@ -66,16 +67,14 @@ class BalancePoller:
         return results
 
     async def poll_moonshot(self) -> Dict[str, Any]:
-        return await self._poll_provider_page(
+        """Moonshot balance is tracked by the balance checker API — skip browser scraping."""
+        return self._build_snapshot(
             provider="moonshot",
-            url="https://platform.moonshot.ai/console/account",
-            selectors=[
-                "text=/[\\u00a5$]\\s*[0-9,.]+/",
-                "text=/balance|credit|wallet/i",
-                ".balance",
-                "[class*='balance']",
-                "[class*='wallet']",
-            ],
+            snapshot_type="usage_status",
+            balance_amount=0.0,
+            balance_currency="USD",
+            balance_source="api_only",
+            raw_response={"note": "Moonshot uses balance checker API, not browser scraping."},
         )
 
     async def poll_anthropic(self) -> Dict[str, Any]:
@@ -99,7 +98,7 @@ class BalancePoller:
     async def poll_minimax(self) -> Dict[str, Any]:
         return await self._poll_provider_page(
             provider="minimax",
-            url="https://www.minimaxi.com/platform",
+            url="https://platform.minimax.io/user-center/payment/balance",
             selectors=[
                 "text=/[￥¥$]\\s*[0-9,.]+/",
                 ".balance",
@@ -239,114 +238,454 @@ class BalancePoller:
 
     async def poll_codex_cli(self) -> Dict[str, Any]:
         """
-        Codex CLI polling placeholder: no direct upstream balance endpoint yet.
+        Scrape Codex CLI usage from chatgpt.com/codex/settings/usage via CDP.
+        Uses sync Playwright in a thread to avoid event loop conflicts with uvicorn.
+        Falls back to synthetic if CDP is unavailable or the page isn't open.
         """
+        use_cdp = bool(self.config.get("use_brave_cdp", False))
+        if not use_cdp:
+            return self._build_snapshot(
+                provider="codex_cli",
+                snapshot_type="usage_status",
+                balance_amount=0.0,
+                balance_currency="credits",
+                balance_source="synthetic",
+                raw_response={"note": "No direct Codex CLI endpoint; enable use_brave_cdp and open the usage page."},
+            )
+
+        codex_data = {}
+        try:
+            codex_data = await asyncio.to_thread(self._cdp_scrape_codex_sync)
+            if codex_data.get("error"):
+                logger.info("CDP Codex scrape: %s", codex_data["error"])
+                codex_data = {}
+        except Exception as e:
+            logger.warning("Codex CLI CDP scrape thread failed: %s", e)
+
+        raw = {
+            "codex_usage": codex_data,
+            "source": "cdp_scrape",
+        }
         return self._build_snapshot(
             provider="codex_cli",
             snapshot_type="usage_status",
             balance_amount=0.0,
             balance_currency="credits",
-            balance_source="synthetic",
-            raw_response={"note": "No direct Codex CLI endpoint; usage is derived from local telemetry."},
+            balance_source="cdp_scrape" if codex_data else "error",
+            raw_response=raw,
         )
+
+    @staticmethod
+    def _find_tab(browser, url_fragment: str):
+        """Find an existing tab whose URL contains the given fragment."""
+        for ctx in browser.contexts:
+            for page in ctx.pages:
+                if url_fragment in (page.url or ""):
+                    return page
+        return None
+
+    @staticmethod
+    def _cdp_scrape_claude_sync() -> Dict[str, Any]:
+        """Sync CDP scrape for Claude usage page. Runs in a thread to avoid
+        event loop conflicts with uvicorn."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return {}
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{_BRAVE_CDP_PORT}", timeout=10000,
+                )
+                page = None
+                for ctx in browser.contexts:
+                    for pg in ctx.pages:
+                        if "claude.ai/settings/usage" in (pg.url or ""):
+                            page = pg
+                            break
+                    if page:
+                        break
+
+                if not page:
+                    browser.close()
+                    return {"error": "Claude usage tab not open in Brave."}
+
+                # Read page as-is — do NOT reload, which can cause login redirects
+                # and conflicts with other CDP connections.
+
+                result = page.evaluate(r'''() => {
+                    const body = document.body.innerText || "";
+                    const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+                    const result = {
+                        plan_usage_pct: null,
+                        plan_usage_reset: null,
+                        weekly_pct: null,
+                        weekly_reset: null,
+                        extra_usage_pct: null,
+                        extra_usage_reset: null,
+                        spend_used: null,
+                        spend_limit: null,
+                    };
+                    for (let i = 0; i < lines.length; i++) {
+                        const line = lines[i].toLowerCase();
+                        if (line.includes("plan usage limit")) {
+                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                                const l = lines[j].trim();
+                                if (/resets?\s+/i.test(l) && result.plan_usage_reset === null) result.plan_usage_reset = l;
+                                const m = l.match(/^(\d+)%\s*used/i);
+                                if (m && result.plan_usage_pct === null) result.plan_usage_pct = parseInt(m[1], 10);
+                            }
+                        }
+                        if (line === "weekly limits" || line === "weekly limit") {
+                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                                const l = lines[j].trim();
+                                if (/resets?\s+/i.test(l) && result.weekly_reset === null) result.weekly_reset = l;
+                                const m = l.match(/^(\d+)%\s*used/i);
+                                if (m && result.weekly_pct === null) result.weekly_pct = parseInt(m[1], 10);
+                            }
+                        }
+                        if (line.startsWith("extra usage")) {
+                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                                const l = lines[j].trim();
+                                if (/resets?\s+/i.test(l) && result.extra_usage_reset === null) result.extra_usage_reset = l;
+                                const m = l.match(/^(\d+)%\s*used/i);
+                                if (m && result.extra_usage_pct === null) result.extra_usage_pct = parseInt(m[1], 10);
+                            }
+                        }
+                        // "$X / $Y" format (old layout)
+                        const spendMatch = line.match(/\$\s*([\d.]+)\s*\/\s*\$\s*([\d.]+)/);
+                        if (spendMatch) {
+                            result.spend_used = parseFloat(spendMatch[1]);
+                            result.spend_limit = parseFloat(spendMatch[2]);
+                        }
+                        // "$X spent" format (current layout)
+                        const spentMatch = line.match(/\$\s*([\d.]+)\s*spent/i);
+                        if (spentMatch && result.spend_used === null) {
+                            result.spend_used = parseFloat(spentMatch[1]);
+                        }
+                        // "Monthly spend limit" preceded by "$X" on prev line
+                        if (line.includes("monthly spend limit") && i > 0) {
+                            const prevLine = lines[i - 1].trim();
+                            const limMatch = prevLine.match(/^\$\s*([\d.]+)$/);
+                            if (limMatch && result.spend_limit === null) {
+                                result.spend_limit = parseFloat(limMatch[1]);
+                            }
+                        }
+                    }
+                    return result;
+                }''')
+
+                browser.close()
+                return result
+        except Exception as e:
+            logger.warning("CDP sync scrape (Claude) failed: %s", e)
+            return {}
+
+    @staticmethod
+    def _cdp_scrape_codex_sync() -> Dict[str, Any]:
+        """Sync CDP scrape for Codex usage page. Runs in a thread to avoid
+        event loop conflicts with uvicorn."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return {}
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{_BRAVE_CDP_PORT}", timeout=10000,
+                )
+                page = None
+                for ctx in browser.contexts:
+                    for pg in ctx.pages:
+                        if "chatgpt.com/codex/settings/usage" in (pg.url or ""):
+                            page = pg
+                            break
+                    if page:
+                        break
+
+                if not page:
+                    browser.close()
+                    return {"error": "Codex usage tab not open in Brave."}
+
+                # Read page as-is — do NOT reload.
+
+                result = page.evaluate(r'''() => {
+                    const body = document.body.innerText || "";
+                    const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+                    const result = {
+                        five_hour_remaining_pct: null,
+                        weekly_remaining_pct: null,
+                        weekly_reset: null,
+                    };
+                    for (let i = 0; i < lines.length; i++) {
+                        const line = lines[i].toLowerCase();
+                        if (line.includes("5 hour usage limit") && !line.includes("spark")) {
+                            for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+                                const m = lines[j].trim().match(/^(\d+)%$/);
+                                if (m && result.five_hour_remaining_pct === null) result.five_hour_remaining_pct = parseInt(m[1], 10);
+                            }
+                        }
+                        if (line.includes("weekly usage limit") && !line.includes("spark")) {
+                            for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+                                const l = lines[j].trim();
+                                const m = l.match(/^(\d+)%$/);
+                                if (m && result.weekly_remaining_pct === null) result.weekly_remaining_pct = parseInt(m[1], 10);
+                                if (/resets?\s+/i.test(l) && result.weekly_reset === null) result.weekly_reset = l;
+                            }
+                        }
+                        if (/^resets?\s+/i.test(lines[i]) && result.weekly_reset === null) result.weekly_reset = lines[i].trim();
+                    }
+                    return result;
+                }''')
+
+                browser.close()
+                return result
+        except Exception as e:
+            logger.warning("CDP sync scrape (Codex) failed: %s", e)
+            return {}
+
+    async def _extract_claude_usage(self, page) -> Dict[str, Any]:
+        """Extract Claude Code usage data from the claude.ai/settings/usage page DOM."""
+        return await page.evaluate(r'''() => {
+            const body = document.body.innerText || "";
+            const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+            const result = {
+                plan_usage_pct: null,
+                plan_usage_reset: null,
+                weekly_pct: null,
+                weekly_reset: null,
+                extra_usage_pct: null,
+                extra_usage_reset: null,
+                spend_used: null,
+                spend_limit: null,
+            };
+
+            // Find sections by scanning lines for known labels
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].toLowerCase();
+                const next = (lines[i + 1] || "").trim();
+                const next2 = (lines[i + 2] || "").trim();
+
+                // "Plan usage limits" section — next lines have reset info + percentage
+                if (line.includes("plan usage limit")) {
+                    // Scan ahead for "Resets in ..." and "X% used"
+                    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                        const l = lines[j].trim();
+                        if (/resets?\s+/i.test(l) && result.plan_usage_reset === null) {
+                            result.plan_usage_reset = l;
+                        }
+                        const pctMatch = l.match(/^(\d+)%\s*used/i);
+                        if (pctMatch && result.plan_usage_pct === null) {
+                            result.plan_usage_pct = parseInt(pctMatch[1], 10);
+                        }
+                    }
+                }
+
+                // "Weekly limits" section
+                if (line === "weekly limits" || line === "weekly limit") {
+                    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                        const l = lines[j].trim();
+                        if (/resets?\s+/i.test(l) && result.weekly_reset === null) {
+                            result.weekly_reset = l;
+                        }
+                        const pctMatch = l.match(/^(\d+)%\s*used/i);
+                        if (pctMatch && result.weekly_pct === null) {
+                            result.weekly_pct = parseInt(pctMatch[1], 10);
+                        }
+                    }
+                }
+
+                // "Extra usage" section
+                if (line.startsWith("extra usage")) {
+                    for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                        const l = lines[j].trim();
+                        if (/resets?\s+/i.test(l) && result.extra_usage_reset === null) {
+                            result.extra_usage_reset = l;
+                        }
+                        const pctMatch = l.match(/^(\d+)%\s*used/i);
+                        if (pctMatch && result.extra_usage_pct === null) {
+                            result.extra_usage_pct = parseInt(pctMatch[1], 10);
+                        }
+                    }
+                }
+
+                // "$X / $Y" spend pattern (monthly spend limit section)
+                const spendMatch = line.match(/\$\s*([\d.]+)\s*\/\s*\$\s*([\d.]+)/);
+                if (spendMatch) {
+                    result.spend_used = parseFloat(spendMatch[1]);
+                    result.spend_limit = parseFloat(spendMatch[2]);
+                }
+            }
+
+            // Also read progress bar widths as fallback/validation
+            const bars = [];
+            document.querySelectorAll('div[style*="width"]').forEach(el => {
+                const w = el.style.width;
+                if (w && w.includes("%") && el.className.includes("transition")) {
+                    bars.push(parseFloat(w));
+                }
+            });
+            result.progress_bars = bars;
+
+            return result;
+        }''')
+
+    async def _extract_codex_usage(self, page) -> Dict[str, Any]:
+        """Extract Codex CLI usage data from the chatgpt.com/codex/settings/usage page DOM."""
+        return await page.evaluate(r'''() => {
+            const body = document.body.innerText || "";
+            const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+            const result = {
+                five_hour_remaining_pct: null,
+                weekly_remaining_pct: null,
+                weekly_reset: null,
+            };
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].toLowerCase();
+
+                // "5 hour usage limit" — next line is "X%" then "remaining"
+                if (line.includes("5 hour usage limit") && !line.includes("spark")) {
+                    for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+                        const l = lines[j].trim();
+                        const pctMatch = l.match(/^(\d+)%$/);
+                        if (pctMatch && result.five_hour_remaining_pct === null) {
+                            result.five_hour_remaining_pct = parseInt(pctMatch[1], 10);
+                        }
+                    }
+                }
+
+                // "Weekly usage limit" — next line is "X%" then "remaining"
+                if (line.includes("weekly usage limit") && !line.includes("spark")) {
+                    for (let j = i + 1; j < Math.min(i + 4, lines.length); j++) {
+                        const l = lines[j].trim();
+                        const pctMatch = l.match(/^(\d+)%$/);
+                        if (pctMatch && result.weekly_remaining_pct === null) {
+                            result.weekly_remaining_pct = parseInt(pctMatch[1], 10);
+                        }
+                        if (/resets?\s+/i.test(l) && result.weekly_reset === null) {
+                            result.weekly_reset = l;
+                        }
+                    }
+                }
+
+                // Reset text can also be after the percentages
+                if (/^resets?\s+/i.test(lines[i]) && result.weekly_reset === null) {
+                    result.weekly_reset = lines[i].trim();
+                }
+            }
+
+            // Read progress bar widths
+            const bars = [];
+            document.querySelectorAll('div[style*="width"]').forEach(el => {
+                const w = el.style.width;
+                if (w && w.includes("%") && el.className.includes("transition")) {
+                    bars.push(parseFloat(w));
+                }
+            });
+            result.progress_bars = bars;
+
+            return result;
+        }''')
 
     async def _poll_claude_usage_page(self) -> Dict[str, Any]:
-        """Best-effort scrape of Claude usage page for spend/extra usage display."""
-        try:
-            from playwright.async_api import async_playwright  # pylint: disable=import-outside-toplevel
-        except Exception:
-            return {}
-
+        """
+        Scrape Claude usage page for spend, extra usage, and usage window percentages.
+        Uses sync Playwright in a thread to avoid event loop conflicts with uvicorn.
+        Falls back to headless browser if CDP is unavailable.
+        """
         use_cdp = bool(self.config.get("use_brave_cdp", False))
-        url = "https://claude.ai/settings/usage"
-        page_text = ""
-        final_url = url
-        try:
-            async with async_playwright() as p:
-                browser = None
-                if use_cdp:
-                    try:
-                        browser = await p.chromium.connect_over_cdp(
-                            f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
-                            timeout=10000,
-                        )
-                        context = browser.contexts[0]
-                    except Exception:
-                        browser = None
-                        context = await p.chromium.launch_persistent_context(
-                            user_data_dir=str(self.profiles_dir / "anthropic"),
-                            headless=True,
-                            viewport={"width": 1400, "height": 900},
-                        )
-                else:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=str(self.profiles_dir / "anthropic"),
-                        headless=True,
-                        viewport={"width": 1400, "height": 900},
-                    )
 
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+        # --- CDP path: run sync Playwright in a thread ---
+        if use_cdp:
+            try:
+                result = await asyncio.to_thread(self._cdp_scrape_claude_sync)
+                if result and not result.get("error"):
+                    return {
+                        "logged_in": True,
+                        "spend_used": result.get("spend_used"),
+                        "spend_limit": result.get("spend_limit"),
+                        "spend_reset_text": result.get("extra_usage_reset"),
+                        "extra_usage_balance": None,
+                        "plan_usage_pct": result.get("plan_usage_pct"),
+                        "plan_usage_reset": result.get("plan_usage_reset"),
+                        "weekly_pct": result.get("weekly_pct"),
+                        "weekly_reset": result.get("weekly_reset"),
+                        "extra_usage_pct": result.get("extra_usage_pct"),
+                    }
+                elif result.get("error"):
+                    logger.info("CDP Claude scrape: %s", result["error"])
+            except Exception as e:
+                logger.warning("CDP Claude scrape thread failed: %s", e)
+
+        # No headless fallback — when use_brave_cdp is enabled, only use CDP
+        # to avoid launching browser instances that leak tabs and consume memory.
+        return {}
+
+    @staticmethod
+    def _cdp_scrape_provider_sync(url: str, selectors: List[str]) -> Dict[str, Any]:
+        """Sync CDP scrape for generic provider pages. Runs in a thread."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception:
+            return {"error": "playwright not installed"}
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.connect_over_cdp(
+                    f"http://127.0.0.1:{_BRAVE_CDP_PORT}", timeout=10000,
+                )
+
+                # Find existing tab by URL instead of opening a new one.
+                # Match on the URL's host+path to handle query params.
+                from urllib.parse import urlparse
+                target_host = urlparse(url).netloc
+                page = None
+                for ctx in browser.contexts:
+                    for pg in ctx.pages:
+                        if target_host in (pg.url or ""):
+                            page = pg
+                            break
+                    if page:
+                        break
+
+                if not page:
+                    browser.close()
+                    return {"error": f"Tab not open in Brave for {url}"}
+
+                # Read page as-is — do NOT reload.
+
+                selected_text = None
+                for selector in selectors:
+                    try:
+                        page.wait_for_selector(selector, timeout=6000)
+                        selected_text = page.locator(selector).first.text_content() or ""
+                        if selected_text:
+                            break
+                    except Exception:
+                        continue
+
+                page_text = ""
                 try:
-                    await page.wait_for_load_state("networkidle", timeout=15000)
+                    if not page.is_closed():
+                        page_text = page.inner_text("body")
                 except Exception:
                     pass
-                await page.wait_for_timeout(1200)
-                page_text = await self._read_body_text(page, context)
-                final_url = page.url if page and (not page.is_closed()) else url
-                if not page.is_closed():
-                    await page.close()
-                if browser:
-                    await browser.close()
-                else:
-                    await context.close()
-        except Exception:
-            return {}
 
-        lower = (page_text or "").lower()
-        if any(part in (final_url or "").lower() for part in ["login", "log-in", "sign-in", "signin", "auth"]) or (
-            "password" in lower and ("sign in" in lower or "log in" in lower)
-        ):
-            return {"logged_in": False}
+                final_url = page.url if not page.is_closed() else url
+                browser.close()
 
-        normalized = re.sub(r"\s+", " ", page_text.replace("\xa0", " ")).strip()
-        spend_used = None
-        spend_limit = None
-        spend_reset_text = None
-        extra_usage_balance = None
-
-        spend_match = re.search(
-            r"\$\s*([0-9]+(?:\.[0-9]+)?)\s*/\s*\$\s*([0-9]+(?:\.[0-9]+)?)",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        if spend_match:
-            spend_used = float(spend_match.group(1))
-            spend_limit = float(spend_match.group(2))
-
-        reset_match = re.search(
-            r"resets?\s*([A-Za-z]{3,9}\s+\d{1,2}(?:,\s*\d{4})?)",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        if reset_match:
-            spend_reset_text = reset_match.group(1).strip()
-
-        extra_match = re.search(
-            r"extra usage(?:\s+balance)?[^$]{0,40}\$\s*([0-9]+(?:\.[0-9]+)?)",
-            normalized,
-            flags=re.IGNORECASE,
-        )
-        if extra_match:
-            extra_usage_balance = float(extra_match.group(1))
-
-        return {
-            "logged_in": True,
-            "spend_used": spend_used,
-            "spend_limit": spend_limit,
-            "spend_reset_text": spend_reset_text,
-            "extra_usage_balance": extra_usage_balance,
-        }
+                return {
+                    "selected_text": selected_text,
+                    "page_text": page_text,
+                    "final_url": final_url,
+                    "body_length": len(page_text),
+                    "body_preview": page_text[:600],
+                }
+        except Exception as e:
+            return {"error": str(e)}
 
     async def _poll_provider_page(
         self,
@@ -362,64 +701,29 @@ class BalancePoller:
         raw_response: Dict[str, Any] = {"url": url, "selected_text": None}
         page_text = ""
         use_cdp = bool(self.config.get("use_brave_cdp", False))
-        try:
-            async with async_playwright() as p:
-                browser = None
-                if use_cdp:
-                    # Optional foreground mode for shared Brave cookies.
-                    # Disabled by default to avoid visible tab opening.
-                    try:
-                        browser = await p.chromium.connect_over_cdp(
-                            f"http://127.0.0.1:{_BRAVE_CDP_PORT}",
-                            timeout=10000,
-                        )
-                        context = browser.contexts[0]
-                    except Exception as cdp_exc:
-                        logger.warning("CDP connection failed (%s), using headless profile", cdp_exc)
-                        browser = None
-                        context = await p.chromium.launch_persistent_context(
-                            user_data_dir=str(self.profiles_dir / provider),
-                            headless=True,
-                            viewport={"width": 1400, "height": 900},
-                        )
+
+        # --- CDP path: run sync Playwright in a thread ---
+        if use_cdp:
+            try:
+                cdp_result = await asyncio.to_thread(
+                    self._cdp_scrape_provider_sync, url, selectors
+                )
+                if not cdp_result.get("error"):
+                    raw_response["selected_text"] = cdp_result.get("selected_text")
+                    raw_response["final_url"] = cdp_result.get("final_url", url)
+                    raw_response["body_length"] = cdp_result.get("body_length", 0)
+                    raw_response["body_preview"] = cdp_result.get("body_preview", "")
+                    page_text = cdp_result.get("page_text", "")
+                    # Skip to parsing below
                 else:
-                    context = await p.chromium.launch_persistent_context(
-                        user_data_dir=str(self.profiles_dir / provider),
-                        headless=True,
-                        viewport={"width": 1400, "height": 900},
-                    )
+                    logger.warning("CDP provider scrape failed for %s: %s", provider, cdp_result["error"])
+                    return self._error_snapshot(provider, f"CDP scrape failed: {cdp_result['error']}", raw_response=raw_response)
+            except Exception as cdp_exc:
+                logger.warning("CDP provider scrape thread failed for %s: %s", provider, cdp_exc)
+                return self._error_snapshot(provider, f"CDP connection failed: {cdp_exc}", raw_response=raw_response)
 
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=15000)
-                except Exception:
-                    pass
-                await page.wait_for_timeout(1500)
-
-                selected_text = None
-                for selector in selectors:
-                    try:
-                        await page.wait_for_selector(selector, timeout=6000)
-                        selected_text = (await page.locator(selector).first.text_content()) or ""
-                        if selected_text:
-                            break
-                    except Exception:
-                        continue
-
-                page_text = await self._read_body_text(page, context)
-                raw_response["selected_text"] = selected_text
-                raw_response["final_url"] = page.url if page and (not page.is_closed()) else url
-                raw_response["body_length"] = len(page_text or "")
-                raw_response["body_preview"] = (page_text or "")[:600]
-                if not page.is_closed():
-                    await page.close()
-                if browser:
-                    await browser.close()  # Disconnect CDP (does NOT close Brave)
-                else:
-                    await context.close()  # Close isolated browser
-        except Exception as exc:
-            return self._error_snapshot(provider, str(exc), raw_response=raw_response)
+        # No headless fallback — CDP-only when use_brave_cdp is enabled
+        # to avoid launching browser instances that leak tabs and consume memory.
 
         candidate_text = raw_response.get("selected_text") or page_text
         parsed = self._parse_provider_balance(provider, candidate_text or "", page_text or "")

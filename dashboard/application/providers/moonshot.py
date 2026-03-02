@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class MoonshotProvider:
     """Moonshot API provider adapter."""
 
-    BALANCE_ENDPOINT = "https://api.moonshot.cn/v1/users/me/balance"
+    BALANCE_ENDPOINT = "https://api.moonshot.ai/v1/users/me/balance"
 
     def __init__(self, config: dict):
         self._config = config
@@ -65,7 +65,8 @@ class MoonshotProvider:
 
                 resp.raise_for_status()
                 data = resp.json()
-                balance = data.get("data", {}).get("balance", 0.0)
+                d = data.get("data", {})
+                balance = d.get("available_balance") or d.get("cash_balance") or d.get("balance", 0.0)
 
                 return BalanceResponse(
                     remaining=round(float(balance), 2),

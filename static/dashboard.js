@@ -404,6 +404,7 @@ async function loadData() {
         const interval = document.getElementById('filterInterval').value;
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
+        const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
         const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits] = await Promise.all([
             fetch(`/api/summary?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/summary?_=1').then(r=>r.json()),  // unfiltered for earliest timestamp
@@ -413,11 +414,11 @@ async function loadData() {
             fetch(`/api/tools?_=1${kpiRange}`).then(r=>r.json()),
             fetch('/api/balance').then(r=>r.json()),
             fetch('/api/resources').then(r=>r.json()),
-            fetch('/api/evals').then(r=>r.json()),
+            safeFetch('/api/evals', {evals:[]}),
             fetch(`/api/cost/daily?_=1${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/cost/projection?_=1${kpiRange}`).then(r=>r.json()),
-            fetch('/api/ratelimits').then(r=>r.json()),
-            fetch('/api/spendlimits').then(r=>r.json()),
+            safeFetch(`/api/cost/projection?_=1${kpiRange}`, null),
+            safeFetch('/api/ratelimits', {entries:[]}),
+            safeFetch('/api/spendlimits', {entries:[]}),
         ]);
         allData = {summary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,ratelimits,spendlimits};
         absoluteEarliest = unfilteredSummary.earliest_timestamp || 0;
@@ -436,19 +437,21 @@ async function loadFilteredData() {
         const interval = document.getElementById('filterInterval').value;
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
-        const [summary,timeseries,calls,models,tools,costDaily,costProjection,ratelimits] = await Promise.all([
+        const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
+        const [summary,timeseries,calls,models,tools,costDaily,costProjection,ratelimits,balance] = await Promise.all([
             fetch(`/api/summary?_=1${fq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/timeseries?interval=${interval}${fq}${tsRange}`).then(r=>r.json()),
             fetch(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${fq}${rq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/models?_=1${fq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/tools?_=1${fq}${kpiRange}`).then(r=>r.json()),
             fetch(`/api/cost/daily?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/cost/projection?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            fetch('/api/ratelimits').then(r=>r.json()),
+            safeFetch(`/api/cost/projection?_=1${fq}${kpiRange}`, null),
+            safeFetch('/api/ratelimits', {entries:[]}),
+            fetch('/api/balance').then(r=>r.json()),
         ]);
         allData.summary=summary; allData.timeseries=timeseries; allData.calls=calls;
         allData.models=models; allData.tools=tools; allData.costDaily=costDaily; allData.costProjection=costProjection;
-        allData.ratelimits=ratelimits;
+        allData.ratelimits=ratelimits; allData.balance=balance;
         await renderDashboard();
     } catch(e) { showToast('Filter failed: '+e.message,'error'); }
 }
@@ -519,8 +522,12 @@ function renderResources() {
         const statusClass5h = p5h >= 90 ? 'critical' : p5h >= 70 ? 'warn' : 'ok';
         const statusClass1w = p1w >= 90 ? 'critical' : p1w >= 70 ? 'warn' : 'ok';
         const creditsStatusClass = usedPct >= 90 ? 'critical' : usedPct >= 75 ? 'warn' : 'ok';
-        const resetMeta5h = `<div class="resource-window-meta">Resets: ${formatReset(w5h.reset_at)} | Remaining Time: ${formatRemaining(w5h.remaining_seconds)}</div>`;
-        const resetMeta1w = `<div class="resource-window-meta">Resets: ${formatReset(w1w.reset_at)} | Remaining Time: ${formatRemaining(w1w.remaining_seconds)}</div>`;
+        const resetText5h = w5h.reset_text || (w5h.reset_at ? formatReset(w5h.reset_at) : null);
+        const resetText1w = w1w.reset_text || (w1w.reset_at ? formatReset(w1w.reset_at) : null);
+        const remainText5h = w5h.remaining_seconds != null ? formatRemaining(w5h.remaining_seconds) : null;
+        const remainText1w = w1w.remaining_seconds != null ? formatRemaining(w1w.remaining_seconds) : null;
+        const resetMeta5h = resetText5h || remainText5h ? `<div class="resource-window-meta">${resetText5h ? `Resets: ${resetText5h}` : ''}${resetText5h && remainText5h ? ' | ' : ''}${remainText5h ? `Remaining: ${remainText5h}` : ''}</div>` : '';
+        const resetMeta1w = resetText1w || remainText1w ? `<div class="resource-window-meta">${resetText1w ? `Resets: ${resetText1w}` : ''}${resetText1w && remainText1w ? ' | ' : ''}${remainText1w ? `Remaining: ${remainText1w}` : ''}</div>` : '';
         const windowsMarkup = hasWindows ? `
             <div class="resource-meter">
                 <div class="resource-meter-head">
@@ -1394,8 +1401,12 @@ function renderTopTools() {
 
 function renderProjection() {
     const p = allData.costProjection;
-    document.getElementById('projectionCost').textContent = `$${p.projected_monthly_cost.toFixed(2)}`;
-    document.getElementById('projectionNote').textContent = `Based on ${p.days_of_data} days ($${p.avg_daily_cost.toFixed(2)}/day)`;
+    if (!p) return;
+    const monthlyCost = p.projected_monthly_cost ?? p.projected_monthly ?? 0;
+    const days = p.days_of_data ?? p.based_on_days ?? 0;
+    const dailyCost = p.avg_daily_cost ?? p.daily_rate ?? 0;
+    document.getElementById('projectionCost').textContent = `$${monthlyCost.toFixed(2)}`;
+    document.getElementById('projectionNote').textContent = `Based on ${days} days ($${dailyCost.toFixed(2)}/day)`;
 }
 
 // ============================================================================
