@@ -138,6 +138,10 @@ rate_limits:
     - claude-3-5-sonnet-20241022
     auto_detected: true
   claude-haiku:
+    rpm: 1000
+    tpm: 540000
+    input_tpm: 450000
+    output_tpm: 90000
     models:
     - claude-haiku-4-5
     - claude-haiku-4-5-20251001

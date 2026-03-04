@@ -1,0 +1,13 @@
+.git
+__pycache__
+*.pyc
+*.pyo
+.venv
+venv
+browser_profiles
+*.db
+*.db-wal
+*.db-shm
+node_modules
+.pytest_cache
+.mypy_cache

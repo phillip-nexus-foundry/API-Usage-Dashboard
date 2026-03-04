@@ -16,6 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from parsers.session_paths import resolve_sessions_dir
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +35,13 @@ def create_app() -> FastAPI:
     Application factory. Creates FastAPI app with all tiers wired together.
     """
     config = _load_config()
+    resolved_sessions_dir = resolve_sessions_dir(config.get("sessions_dir"))
+    if config.get("sessions_dir") != resolved_sessions_dir:
+        logger.warning(
+            "Configured sessions_dir '%s' not found; using '%s'",
+            config.get("sessions_dir"),
+            resolved_sessions_dir,
+        )
 
     # ========== DATA TIER ==========
     from dashboard.data.database import Database
@@ -76,32 +84,16 @@ def create_app() -> FastAPI:
         "minimax": MiniMaxProvider(config),
     }
 
-    balance_service = BalanceService(
-        balance_repo=balance_repo,
-        telemetry_repo=telemetry_repo,
-        reconciliation_engine=reconciliation_engine,
-        providers=providers,
-        config=config,
-        event_bus=event_bus,
-    )
-
-    ingestion_service = IngestionService(
-        telemetry_repo=telemetry_repo,
-        file_index_repo=file_index_repo,
-        cost_service=cost_service,
-        event_bus=event_bus,
-        sessions_dir=config.get("sessions_dir", ""),
-    )
-
-    projection_service = ProjectionService(telemetry_repo, config)
-
     # Legacy components (bridge to existing code during transition)
     balance_poller = None
     try:
         from balance.poller import BalancePoller
+        # Use /app/data/ for persistent storage (Docker volume mount)
+        data_dir = PROJECT_ROOT / "data"
+        data_dir.mkdir(exist_ok=True)
         balance_poller = BalancePoller(
             config,
-            db_path=str(PROJECT_ROOT / "dashboard.db"),
+            db_path=str(data_dir / "dashboard.db"),
             profiles_dir=str(PROJECT_ROOT / "browser_profiles"),
             config_path=str(CONFIG_PATH),
             alert_threshold_pct=5.0,
@@ -110,6 +102,26 @@ def create_app() -> FastAPI:
         )
     except Exception as e:
         logger.warning(f"Legacy BalancePoller not available: {e}")
+
+    balance_service = BalanceService(
+        balance_repo=balance_repo,
+        telemetry_repo=telemetry_repo,
+        reconciliation_engine=reconciliation_engine,
+        providers=providers,
+        config=config,
+        event_bus=event_bus,
+        balance_poller=balance_poller,
+    )
+
+    ingestion_service = IngestionService(
+        telemetry_repo=telemetry_repo,
+        file_index_repo=file_index_repo,
+        cost_service=cost_service,
+        event_bus=event_bus,
+        sessions_dir=resolved_sessions_dir,
+    )
+
+    projection_service = ProjectionService(telemetry_repo, config)
 
     # ========== PRESENTATION TIER ==========
     from dashboard.presentation.routes import telemetry, balance, projection, system, resources, ratelimits, spendlimits

@@ -37,6 +37,7 @@ class BalanceService:
         providers: Dict[str, ProviderAdapter],
         config: dict,
         event_bus: Optional[EventBus] = None,
+        balance_poller=None,
     ):
         self._balance_repo = balance_repo
         self._telemetry_repo = telemetry_repo
@@ -44,6 +45,9 @@ class BalanceService:
         self._providers = providers
         self._config = config
         self._event_bus = event_bus
+        self._balance_poller = balance_poller
+        # Last-good-known cache: {provider: DataPoint} — survives fetch failures
+        self._last_good: Dict[str, DataPoint] = {}
 
     async def check_balance(self, provider_name: str) -> Dict[str, Any]:
         """
@@ -82,7 +86,52 @@ class BalanceService:
                     "confidence": api_result.confidence,
                 })
 
-        # 2. Compute from ledger
+        # 2. Try scraped balance from legacy poller (CDP/browser)
+        scrape_succeeded = False
+        if self._balance_poller:
+            try:
+                snapshots = self._balance_poller.get_latest_snapshots([provider_name])
+                snap = snapshots.get(provider_name, {})
+                scraped_bal = snap.get("balance_amount")
+                scraped_src = snap.get("balance_source", "")
+                # Only cache scraped balance if it's > 0 (non-zero is valid)
+                # Treat 0 as failed scrape to prevent caching auth failures
+                scraped_bal_float = None
+                if scraped_bal is not None:
+                    try:
+                        scraped_bal_float = float(scraped_bal)
+                    except (TypeError, ValueError):
+                        scraped_bal_float = None
+
+                if (
+                    scraped_bal_float is not None
+                    and scraped_bal_float > 0
+                    and scraped_src in ("browser_poll", "cdp_scrape")
+                ):
+                    scraped_point = DataPoint(
+                        value=scraped_bal_float,
+                        source="scraped",
+                        confidence=0.95,
+                        timestamp=datetime.now(timezone.utc),
+                    )
+                    data_points.append(scraped_point)
+                    self._last_good[provider_name] = scraped_point
+                    scrape_succeeded = True
+                elif scraped_bal_float == 0:
+                    logger.warning(
+                        "Treating scraped zero balance as failed scrape for %s; preserving last-good value.",
+                        provider_name,
+                    )
+            except Exception as e:
+                logger.debug("Scraped balance unavailable for %s: %s", provider_name, e)
+
+            # Use cached scraped value only as fallback when the current scrape fails.
+            if not scrape_succeeded:
+                cached_point = self._last_good.get(provider_name)
+                if cached_point:
+                    data_points.append(cached_point)
+
+        # 3. Compute from ledger
         ledger_balance = self._compute_ledger_balance(provider_name, balance_cfg)
         if ledger_balance is not None:
             data_points.append(DataPoint(
@@ -91,7 +140,7 @@ class BalanceService:
                 confidence=ledger_balance.get("confidence", 0.7),
             ))
 
-        # 3. Reconcile
+        # 4. Reconcile
         reconciled = self._reconciler.reconcile(provider_name, data_points)
 
         # Publish event

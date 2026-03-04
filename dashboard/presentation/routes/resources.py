@@ -280,7 +280,7 @@ async def resources_poll():
     """Trigger immediate resource polling."""
     if _balance_poller:
         results = await _balance_poller.poll_all(
-            ["anthropic", "elevenlabs", "codex_cli"]
+            ["anthropic", "minimax", "elevenlabs", "codex_cli"]
         )
         return {"status": "ok", "polled": len(results)}
     return {"status": "ok", "polled": 0, "note": "Poller not configured"}

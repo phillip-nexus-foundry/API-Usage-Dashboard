@@ -185,7 +185,23 @@ class ReconciliationEngine:
                 notes=f"Weighted average of API ({api_point.confidence}) and computed ({computed_point.confidence})",
             )
 
-        # Strategy 3: Computed/ledger only
+        # Strategy 3: Scraped + computed — prefer scraped (direct observation)
+        if scraped_point and computed_point:
+            drift = computed_val - scraped_val if scraped_val and scraped_val != 0 else None
+            drift_pct = (drift / scraped_val * 100) if drift is not None and scraped_val else None
+            return ReconciledResult(
+                provider=provider,
+                resolved_balance=round(scraped_val, 2),
+                confidence=scraped_point.confidence,
+                method="scraped_authoritative",
+                computed_balance=computed_val,
+                scraped_balance=scraped_val,
+                drift_amount=drift,
+                drift_pct=drift_pct,
+                notes=f"Scraped balance from browser CDP (drift from computed: {drift_pct:+.1f}%)" if drift_pct else "Scraped balance from browser CDP",
+            )
+
+        # Strategy 4: Computed/ledger only
         if computed_point:
             return ReconciledResult(
                 provider=provider,
@@ -197,7 +213,7 @@ class ReconciliationEngine:
                 notes="Only computed balance available (no API endpoint)",
             )
 
-        # Strategy 4: Scraped only (last resort)
+        # Strategy 5: Scraped only (last resort)
         if scraped_point:
             return ReconciledResult(
                 provider=provider,

@@ -71,7 +71,12 @@ class IngestionService:
                 logger.warning(f"Sessions directory not found: {self._sessions_dir}")
                 return result
 
-            for jsonl_file in sessions_path.glob("*.jsonl"):
+            session_files = []
+            for pattern in ("*.jsonl", "*.jsonl.reset.*", "*.jsonl.deleted.*"):
+                session_files.extend(sessions_path.glob(pattern))
+
+            # Deterministic order helps debugging and reproducibility.
+            for jsonl_file in sorted(session_files):
                 file_result = self._process_file(str(jsonl_file))
                 result.files_scanned += 1
                 if file_result > 0:
@@ -208,11 +213,11 @@ class IngestionService:
                     self._timer.start()
 
                 def on_modified(self, event):
-                    if event.src_path.endswith(".jsonl"):
+                    if ".jsonl" in event.src_path:
                         self._debounced_scan()
 
                 def on_created(self, event):
-                    if event.src_path.endswith(".jsonl"):
+                    if ".jsonl" in event.src_path:
                         self._debounced_scan()
 
             observer = Observer()

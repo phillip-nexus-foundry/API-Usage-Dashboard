@@ -7,6 +7,7 @@ Usage:
     python run.py --migrate    # Run DB migrations then start
     python run.py --init-db    # Create tables and seed pricing, then start
 """
+import os
 import sys
 import yaml
 import uvicorn
@@ -49,8 +50,8 @@ def main():
         init_database(config)
 
     server = config.get("server", {})
-    host = server.get("host", "127.0.0.1")
-    port = server.get("port", 8050)
+    host = os.environ.get("HOST", server.get("host", "127.0.0.1"))
+    port = int(os.environ.get("PORT", server.get("port", 8050)))
 
     logger.info(f"Starting API Usage Dashboard on {host}:{port}")
     uvicorn.run(

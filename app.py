@@ -6,6 +6,7 @@ import os
 import json
 import time
 import asyncio
+import calendar
 import yaml
 import logging
 import threading
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 from dataclasses import asdict
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Query, Body
 from fastapi.staticfiles import StaticFiles
@@ -171,6 +173,7 @@ balance_poller = BalancePoller(
     auto_correct=False,
 )
 scheduler = None
+PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
 def _utc_now() -> datetime:
     """Timezone-aware UTC datetime."""
@@ -1396,10 +1399,12 @@ async def balance_topup(
     amount: float = Body(...),
     note: str = Body(""),
     project: Optional[str] = Body(None),
+    top_up_date: Optional[str] = Body(None, alias="topup_date"),
 ):
     """
     Add a top-up entry to a provider's ledger in config.yaml.
     For multi-project providers, specify which project to add to.
+    Optionally specify top_up_date for backdating entries (YYYY-MM-DD format).
     """
     global CONFIG
 
@@ -1428,9 +1433,12 @@ async def balance_topup(
     else:
         return {"error": f"Provider '{provider}' has no ledger configured", "status": 400}
 
+    # Use provided date or default to today
+    entry_date = top_up_date if top_up_date else _utc_now().strftime("%Y-%m-%d")
+    
     # Create new ledger entry
     entry = {
-        "date": _utc_now().strftime("%Y-%m-%d"),
+        "date": entry_date,
         "amount": round(amount, 2),
     }
     if note:
@@ -1578,11 +1586,11 @@ async def cost_daily(
 @app.get("/api/today-cost")
 async def today_cost():
     """
-    Total cost across all providers since local midnight.
+    Total cost across all providers since midnight in America/Los_Angeles.
     """
-    now_local = datetime.now().astimezone()
-    midnight_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    midnight_ms = int(midnight_local.timestamp() * 1000)
+    now_pacific = datetime.now(PACIFIC_TZ)
+    midnight_pacific = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
+    midnight_ms = int(midnight_pacific.timestamp() * 1000)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
@@ -1598,7 +1606,7 @@ async def today_cost():
 
     return {
         "today_cost": round(total_cost, 6),
-        "start_of_day": midnight_local.isoformat(),
+        "start_of_day": midnight_pacific.isoformat(),
         "timestamp": _utc_now().isoformat().replace("+00:00", "Z"),
     }
 
@@ -1607,49 +1615,116 @@ async def today_cost():
 async def cost_projection(
     provider: Optional[str] = Query(None),
     model: Optional[str] = Query(None),
+    timeframe: str = Query(
+        "month",
+        description="Projection timeframe: this_day, week, partial_week, rolling_week, month, rolling_month, all",
+    ),
     start: Optional[int] = Query(None, description="Start timestamp (epoch ms)"),
     end: Optional[int] = Query(None, description="End timestamp (epoch ms)"),
 ):
     """
-    Monthly projection from 7-day trailing average. Supports provider/model/time filters.
+    Cost projection with timeframe-aware scaling. Supports provider/model/time filters.
     """
+    valid_timeframes = {"this_day", "week", "partial_week", "rolling_week", "month", "rolling_month", "all"}
+    tf = (timeframe or "month").strip().lower()
+    if tf not in valid_timeframes:
+        return JSONResponse(
+            {"error": f"Invalid timeframe '{timeframe}'. Expected one of: {sorted(valid_timeframes)}"},
+            status_code=400,
+        )
+
+    now_utc = _utc_now()
+    now_ms = int(now_utc.timestamp() * 1000)
+    now_pacific = datetime.now(PACIFIC_TZ)
+    day_start = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    effective_start = start
+    effective_end = end if end is not None else now_ms
+
+    if tf == "this_day":
+        effective_start = int(day_start.timestamp() * 1000)
+        effective_end = now_ms
+    elif tf == "all":
+        effective_start = None
+        effective_end = now_ms
+
+    if effective_start is None:
+        if tf in {"week", "partial_week", "rolling_week"}:
+            effective_start = int((now_utc - timedelta(days=7)).timestamp() * 1000)
+        elif tf == "month":
+            month_start = now_pacific.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            effective_start = int(month_start.timestamp() * 1000)
+        elif tf == "rolling_month":
+            effective_start = int((now_utc - timedelta(days=30)).timestamp() * 1000)
+        elif tf == "all":
+            effective_start = None
+
     where, params = _build_filter(provider, model)
-    if start:
+    if effective_start is not None:
         where = (where + " AND " if where else " WHERE ") + "timestamp >= ?"
-        params.append(start)
-    if end:
+        params.append(effective_start)
+    if effective_end is not None:
         where = (where + " AND " if where else " WHERE ") + "timestamp <= ?"
-        params.append(end)
-    # Add the 7-day window filter
-    time_filter = " AND timestamp > (SELECT MAX(timestamp) FROM records) - 7 * 24 * 3600 * 1000"
-    if where:
-        full_where = where + time_filter
-    else:
-        full_where = " WHERE timestamp > (SELECT MAX(timestamp) FROM records) - 7 * 24 * 3600 * 1000"
+        params.append(effective_end)
 
     with sqlite3.connect(reader.db_path) as conn:
         cursor = conn.cursor()
 
         cursor.execute(f"""
             SELECT
-                DATE(timestamp / 1000, 'unixepoch') as day,
-                SUM(cost_total) as cost
-            FROM records{full_where}
-            GROUP BY day
+                COALESCE(SUM(cost_total), 0.0) as total_cost,
+                MIN(timestamp) as first_ts,
+                MAX(timestamp) as last_ts
+            FROM records{where}
         """, params)
-        
-        daily_costs = [row[1] for row in cursor.fetchall()]
-        
-        if daily_costs:
-            avg_daily = sum(daily_costs) / len(daily_costs)
-            projected_monthly = avg_daily * 30
+        row = cursor.fetchone() or (0.0, None, None)
+        total_cost = float(row[0] or 0.0)
+
+    ms_per_day = 24 * 60 * 60 * 1000
+
+    if tf == "this_day":
+        start_of_day = now_pacific.replace(hour=0, minute=0, second=0, microsecond=0)
+        elapsed_hours = max((now_pacific - start_of_day).total_seconds() / 3600.0, 1.0 / 60.0)
+        based_on_days = elapsed_hours / 24.0
+        avg_daily = total_cost / based_on_days if based_on_days > 0 else 0.0
+        projected_value = avg_daily
+    elif tf in {"week", "partial_week", "rolling_week"}:
+        if effective_start is not None and effective_end is not None:
+            window_days = max((effective_end - effective_start) / ms_per_day, 1.0 / 24.0)
         else:
-            projected_monthly = 0.0
+            window_days = 7.0
+        based_on_days = window_days
+        avg_daily = total_cost / based_on_days if based_on_days > 0 else 0.0
+        projected_value = avg_daily * 7.0
+    elif tf == "rolling_month":
+        based_on_days = 30.0
+        avg_daily = total_cost / based_on_days if based_on_days > 0 else 0.0
+        projected_value = avg_daily * 30.0
+    elif tf == "month":
+        days_so_far = float(max(now_pacific.day, 1))
+        days_in_month = float(calendar.monthrange(now_pacific.year, now_pacific.month)[1])
+        based_on_days = days_so_far
+        avg_daily = total_cost / based_on_days if based_on_days > 0 else 0.0
+        projected_value = avg_daily * days_in_month
+    else:  # all
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            where_min, params_min = _build_filter(provider, model)
+            cursor.execute(f"SELECT MIN(timestamp), MAX(timestamp) FROM records{where_min}", params_min)
+            min_max = cursor.fetchone() or (None, None)
+        if min_max[0] is not None and min_max[1] is not None:
+            total_days = max((int(min_max[1]) - int(min_max[0])) / ms_per_day, 1.0)
+        else:
+            total_days = 1.0
+        based_on_days = total_days
+        avg_daily = total_cost / based_on_days if based_on_days > 0 else 0.0
+        projected_value = avg_daily * 30.0
     
     return {
-        "days_of_data": len(daily_costs),
-        "avg_daily_cost": round(sum(daily_costs) / len(daily_costs), 6) if daily_costs else 0.0,
-        "projected_monthly_cost": round(projected_monthly, 6),
+        "timeframe": tf,
+        "days_of_data": round(based_on_days, 4),
+        "avg_daily_cost": round(avg_daily, 6),
+        "projected_monthly_cost": round(projected_value, 6),
     }
 
 

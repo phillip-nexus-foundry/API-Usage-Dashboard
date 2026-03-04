@@ -24,9 +24,13 @@ services:
       - "127.0.0.1:8050:8050"
     volumes:
       - ~/.openclaw:/root/.openclaw:ro
+      - dashboard_data:/app/data
     environment:
+      - HOST=0.0.0.0
       - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
       - DATABASE_URL=postgresql://dashboard:dashboard_local@postgres:5432/api_usage_dashboard
+      - BRAVE_CDP_HOST=host.docker.internal
+      - ELEVENLABS_API_KEY=sk_10f001fedce804c6587064bc4b8369ae47e1b25ea986aa05
     depends_on:
       postgres:
         condition: service_healthy
@@ -60,5 +64,6 @@ services:
 
 volumes:
   pgdata:
+  dashboard_data:
   prometheus_data:
   grafana_data:

@@ -14,7 +14,7 @@ from sqlalchemy.orm import sessionmaker, Session
 
 def get_database_url(config: dict) -> str:
     """Resolve database URL from config or environment."""
-    url = config.get("database_url") or os.environ.get("DATABASE_URL")
+    url = os.environ.get("DATABASE_URL") or config.get("database_url")
     if url:
         return url
     # Default: SQLite in project root
