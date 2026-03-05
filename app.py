@@ -1038,11 +1038,48 @@ async def balance():
     configured_balance_providers = set((CONFIG.get("balance") or {}).keys())
     balances = {k: v for k, v in balances.items() if k in configured_balance_providers}
 
+    def _find_last_good_balance(provider_key: str, max_age_seconds: int) -> Optional[float]:
+        """Return recent non-zero scraped/API balance for provider, if available."""
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT timestamp, balance_amount, balance_source
+                FROM resource_snapshots
+                WHERE provider = ?
+                  AND balance_amount IS NOT NULL
+                  AND balance_source IN ('browser_poll', 'cdp_scrape', 'api')
+                ORDER BY timestamp DESC
+                LIMIT 50
+                """,
+                (provider_key,),
+            )
+            rows = cursor.fetchall()
+
+        for ts, bal, src in rows:
+            try:
+                bal_f = float(bal)
+            except (TypeError, ValueError):
+                continue
+            if bal_f <= 0:
+                continue
+            try:
+                age_sec = max(0, (now_ms - int(ts)) // 1000)
+            except Exception:
+                continue
+            if age_sec <= max_age_seconds:
+                return bal_f
+        return None
+
     # Prefer latest scraped balances when available to keep cards live without API keys.
     # Skip providers whose poller returns "api_only" (no browser scraping).
     max_scrape_drift_pct = float(CONFIG.get("balance_override_max_drift_pct", 25.0))
     allow_zero_scrape_balance = bool(CONFIG.get("allow_zero_scrape_balance_override", False))
     scrape_stale_after_seconds = int(CONFIG.get("scrape_error_stale_after_seconds", 900))
+    sticky_balance_max_age_seconds = int(CONFIG.get("sticky_balance_max_age_seconds", 21600))
+    authoritative_scrape_providers = set(
+        (CONFIG.get("authoritative_scrape_providers") or ["minimax"])
+    )
     for provider_name, provider_data in balances.items():
         # Preserve live billing API results; do not overwrite with browser snapshots.
         if provider_data.get("balance_source") == "api":
@@ -1070,14 +1107,17 @@ async def balance():
             continue
         snapshot = snapshots.get(provider_name)
         if not snapshot:
-            continue
+            sticky_bal = _find_last_good_balance(provider_name, sticky_balance_max_age_seconds)
+            if sticky_bal is None:
+                continue
+            snapshot = {"balance_amount": sticky_bal, "balance_source": "sticky"}
         snap_source = snapshot.get("balance_source")
         if snap_source == "api_only":
             continue
-        if snap_source not in {"browser_poll", "cdp_scrape", "api"}:
+        if snap_source not in {"browser_poll", "cdp_scrape", "api", "sticky"}:
             continue
         snap_ts = snapshot.get("timestamp")
-        if snap_ts is not None:
+        if snap_ts is not None and snap_source != "sticky":
             try:
                 snap_age_seconds = max(0, (now_ms - int(snap_ts)) // 1000)
                 if snap_age_seconds > scrape_stale_after_seconds:
@@ -1086,7 +1126,11 @@ async def balance():
                 pass
         snap_balance = snapshot.get("balance_amount")
         if snap_balance is None:
-            continue
+            sticky_bal = _find_last_good_balance(provider_name, sticky_balance_max_age_seconds)
+            if sticky_bal is None:
+                continue
+            snap_balance = sticky_bal
+            snap_source = "sticky"
         try:
             snap_balance_f = float(snap_balance)
         except (TypeError, ValueError):
@@ -1095,7 +1139,11 @@ async def balance():
             # Zero is commonly produced by auth/parse failures; keep computed/API value.
             continue
         current_remaining = provider_data.get("remaining")
-        if isinstance(current_remaining, (int, float)) and current_remaining > 0:
+        if (
+            provider_name not in authoritative_scrape_providers
+            and isinstance(current_remaining, (int, float))
+            and current_remaining > 0
+        ):
             drift_pct = abs(float(snap_balance_f) - float(current_remaining)) / float(current_remaining) * 100.0
             if drift_pct > max_scrape_drift_pct:
                 # Reject large scrape drift so transient scrape failures do not clobber balances.
@@ -2446,4 +2494,5 @@ if __name__ == "__main__":
         host=CONFIG["server"]["host"],
         port=CONFIG["server"]["port"],
         log_level="info",
+        access_log=False,
     )
