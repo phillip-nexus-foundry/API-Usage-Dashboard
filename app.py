@@ -1040,6 +1040,9 @@ async def balance():
 
     # Prefer latest scraped balances when available to keep cards live without API keys.
     # Skip providers whose poller returns "api_only" (no browser scraping).
+    max_scrape_drift_pct = float(CONFIG.get("balance_override_max_drift_pct", 25.0))
+    allow_zero_scrape_balance = bool(CONFIG.get("allow_zero_scrape_balance_override", False))
+    scrape_stale_after_seconds = int(CONFIG.get("scrape_error_stale_after_seconds", 900))
     for provider_name, provider_data in balances.items():
         # Preserve live billing API results; do not overwrite with browser snapshots.
         if provider_data.get("balance_source") == "api":
@@ -1071,10 +1074,33 @@ async def balance():
         snap_source = snapshot.get("balance_source")
         if snap_source == "api_only":
             continue
+        if snap_source not in {"browser_poll", "cdp_scrape", "api"}:
+            continue
+        snap_ts = snapshot.get("timestamp")
+        if snap_ts is not None:
+            try:
+                snap_age_seconds = max(0, (now_ms - int(snap_ts)) // 1000)
+                if snap_age_seconds > scrape_stale_after_seconds:
+                    continue
+            except Exception:
+                pass
         snap_balance = snapshot.get("balance_amount")
         if snap_balance is None:
             continue
-        provider_data["remaining"] = round(float(snap_balance), 2)
+        try:
+            snap_balance_f = float(snap_balance)
+        except (TypeError, ValueError):
+            continue
+        if snap_balance_f <= 0 and not allow_zero_scrape_balance:
+            # Zero is commonly produced by auth/parse failures; keep computed/API value.
+            continue
+        current_remaining = provider_data.get("remaining")
+        if isinstance(current_remaining, (int, float)) and current_remaining > 0:
+            drift_pct = abs(float(snap_balance_f) - float(current_remaining)) / float(current_remaining) * 100.0
+            if drift_pct > max_scrape_drift_pct:
+                # Reject large scrape drift so transient scrape failures do not clobber balances.
+                continue
+        provider_data["remaining"] = round(snap_balance_f, 2)
         provider_data.pop("api_note", None)
         provider_data["scrape_error"] = None
         if provider_data.get("total_deposits") is not None:
@@ -1320,6 +1346,7 @@ async def resources():
             spend_limit = usage_payload.get("spend_limit") if isinstance(usage_payload, dict) else None
             spend_reset_text = usage_payload.get("spend_reset_text") if isinstance(usage_payload, dict) else None
             extra_balance = usage_payload.get("extra_usage_balance") if isinstance(usage_payload, dict) else None
+            usage_source = usage_payload.get("source") if isinstance(usage_payload, dict) else None
             if usage_allow_fallback and spend_used is None:
                 spend_used = fallback.get("spend_used")
             if usage_allow_fallback and spend_limit is None:
@@ -1328,6 +1355,32 @@ async def resources():
                 spend_reset_text = fallback.get("spend_reset_text")
             if usage_allow_fallback and extra_balance is None:
                 extra_balance = fallback.get("extra_usage_balance")
+
+            # Guard against brief low-confidence regressions in Claude extra usage balance.
+            # Prefer last-good value when the new sample is from a weaker source and drifts too far.
+            extra_guard_delta = float(CONFIG.get("claude_extra_usage_guard_max_delta", 0.5))
+            last_good_usage = _find_last_good_window_scrape("anthropic")
+            prev_extra = None
+            prev_source = None
+            if isinstance(last_good_usage, dict):
+                prev_extra = last_good_usage.get("extra_usage_balance")
+                prev_source = last_good_usage.get("source")
+            source_rank = {
+                "oauth_usage_api": 3,
+                "rainmeter_port": 3,
+                "cdp_scrape": 2,
+                "fallback": 1,
+                None: 1,
+            }
+            if isinstance(prev_extra, (int, float)):
+                if extra_balance is None:
+                    extra_balance = prev_extra
+                elif isinstance(extra_balance, (int, float)):
+                    cur_rank = source_rank.get(usage_source, 1)
+                    prev_rank = source_rank.get(prev_source, 1)
+                    if prev_rank >= cur_rank and abs(float(extra_balance) - float(prev_extra)) > extra_guard_delta:
+                        extra_balance = prev_extra
+
             if isinstance(extra_balance, (int, float)):
                 extra_value = round(float(extra_balance), 2)
             if isinstance(spend_limit, (int, float)):
