@@ -78,6 +78,18 @@ document.addEventListener('DOMContentLoaded', () => {
     setInterval(loadData, 10000);
 });
 
+function fetchJsonNoCache(url) {
+    const sep = url.includes('?') ? '&' : '?';
+    return fetch(`${url}${sep}_ts=${Date.now()}`, { cache: 'no-store' }).then(r => r.json());
+}
+
+function safeFetchJsonNoCache(url, fallback = {}) {
+    const sep = url.includes('?') ? '&' : '?';
+    return fetch(`${url}${sep}_ts=${Date.now()}`, { cache: 'no-store' })
+        .then(r => r.ok ? r.json() : fallback)
+        .catch(() => fallback);
+}
+
 function restoreUIState() {
     document.getElementById('filterProvider').value = savedFilters.provider;
     document.getElementById('filterModel').value = savedFilters.model;
@@ -124,6 +136,16 @@ function getKpiRangeParams() {
         }
     }
     return `&start=${start.getTime()}&end=${now.getTime()}`;
+}
+
+function getProjectionTimeframeParam() {
+    const range = document.getElementById('kpiRangeSelect').value;
+    const rolling = document.getElementById('kpiRollingToggle').checked;
+    if (range === 'today') return '&timeframe=this_day';
+    if (range === 'week') return rolling ? '&timeframe=rolling_week' : '&timeframe=partial_week';
+    if (range === 'month') return rolling ? '&timeframe=rolling_month' : '&timeframe=month';
+    if (range === 'all' || range === 'year') return '&timeframe=all';
+    return '&timeframe=month';
 }
 
 function getContainingKpiRangeInfo() {
@@ -184,12 +206,23 @@ function getKpiRangeLabel() {
 }
 
 function setupEventListeners() {
-    document.getElementById('refreshBtn').addEventListener('click', () => {
+    document.getElementById('refreshBtn').addEventListener('click', async () => {
         const btn = document.getElementById('refreshBtn');
         btn.disabled = true; btn.textContent = 'Refreshing...';
-        fetch('/api/refresh', {method:'POST'}).then(() => loadData()).finally(() => {
+        try {
+            const resp = await fetch('/api/refresh', { method:'POST', cache:'no-store' });
+            const data = await resp.json();
+            if (data.status === 'error') {
+                showToast(`Refresh failed: ${data.error || 'unknown error'}`, 'error');
+            } else {
+                showToast('Refresh complete', 'success');
+            }
+            await loadData();
+        } catch (e) {
+            showToast('Refresh failed: ' + e.message, 'error');
+        } finally {
             btn.disabled = false; btn.textContent = 'Refresh';
-        });
+        }
     });
     document.getElementById('utcToggle').addEventListener('change', e => {
         useUTC = e.target.checked;
@@ -261,12 +294,18 @@ function setupEventListeners() {
         btn.disabled = true;
         btn.textContent = 'Polling...';
         try {
-            const resp = await fetch('/api/resources/poll', { method: 'POST' });
+            const resp = await fetch('/api/resources/poll', { method: 'POST', cache: 'no-store' });
             const data = await resp.json();
             if (data.error) {
                 showToast(data.error, 'error');
             } else {
-                allData.resources = { providers: data.providers || {} };
+                const [resources, balance] = await Promise.all([
+                    fetchJsonNoCache('/api/resources'),
+                    fetchJsonNoCache('/api/balance'),
+                ]);
+                allData.resources = resources;
+                allData.balance = balance;
+                renderBalance();
                 renderResources();
                 showToast('Resource poll complete', 'success');
             }
@@ -404,19 +443,20 @@ async function loadData() {
         const interval = document.getElementById('filterInterval').value;
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
-        const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
+        const projectionTf = getProjectionTimeframeParam();
+        const safeFetch = (url, fallback={}) => safeFetchJsonNoCache(url, fallback);
         const [summary,unfilteredSummary,timeseries,calls,models,tools,balance,resources,evals,costDaily,costProjection,todayCost,ratelimits,spendlimits] = await Promise.all([
-            fetch(`/api/summary?_=1${kpiRange}`).then(r=>r.json()),
-            fetch('/api/summary?_=1').then(r=>r.json()),  // unfiltered for earliest timestamp
-            fetch(`/api/timeseries?interval=${interval}${tsRange}`).then(r=>r.json()),
-            fetch(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/models?_=1${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/tools?_=1${kpiRange}`).then(r=>r.json()),
-            fetch('/api/balance').then(r=>r.json()),
-            fetch('/api/resources').then(r=>r.json()),
+            fetchJsonNoCache(`/api/summary?_=1${kpiRange}`),
+            fetchJsonNoCache('/api/summary?_=1'),  // unfiltered for earliest timestamp
+            fetchJsonNoCache(`/api/timeseries?interval=${interval}${tsRange}`),
+            fetchJsonNoCache(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${kpiRange}`),
+            fetchJsonNoCache(`/api/models?_=1${kpiRange}`),
+            fetchJsonNoCache(`/api/tools?_=1${kpiRange}`),
+            fetchJsonNoCache('/api/balance'),
+            fetchJsonNoCache('/api/resources'),
             safeFetch('/api/evals', {evals:[]}),
-            fetch(`/api/cost/daily?_=1${kpiRange}`).then(r=>r.json()),
-            safeFetch(`/api/cost/projection?_=1${kpiRange}`, null),
+            fetchJsonNoCache(`/api/cost/daily?_=1${kpiRange}`),
+            safeFetch(`/api/cost/projection?_=1${projectionTf}${kpiRange}`, null),
             safeFetch('/api/today-cost', {today_cost: 0}),
             safeFetch('/api/ratelimits', {entries:[]}),
             safeFetch('/api/spendlimits', {entries:[]}),
@@ -438,22 +478,24 @@ async function loadFilteredData() {
         const interval = document.getElementById('filterInterval').value;
         const tsRange = getTsRangeParams();
         const kpiRange = getKpiRangeParams();
-        const safeFetch = (url, fallback={}) => fetch(url).then(r => r.ok ? r.json() : fallback).catch(() => fallback);
-        const [summary,timeseries,calls,models,tools,costDaily,costProjection,todayCost,ratelimits,balance] = await Promise.all([
-            fetch(`/api/summary?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/timeseries?interval=${interval}${fq}${tsRange}`).then(r=>r.json()),
-            fetch(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${fq}${rq}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/models?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/tools?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            fetch(`/api/cost/daily?_=1${fq}${kpiRange}`).then(r=>r.json()),
-            safeFetch(`/api/cost/projection?_=1${fq}${kpiRange}`, null),
+        const projectionTf = getProjectionTimeframeParam();
+        const safeFetch = (url, fallback={}) => safeFetchJsonNoCache(url, fallback);
+        const [summary,timeseries,calls,models,tools,costDaily,costProjection,todayCost,ratelimits,balance,resources] = await Promise.all([
+            fetchJsonNoCache(`/api/summary?_=1${fq}${kpiRange}`),
+            fetchJsonNoCache(`/api/timeseries?interval=${interval}${fq}${tsRange}`),
+            fetchJsonNoCache(`/api/calls?page=${currentPage}&per_page=${callsPerPage}${fq}${rq}${kpiRange}`),
+            fetchJsonNoCache(`/api/models?_=1${fq}${kpiRange}`),
+            fetchJsonNoCache(`/api/tools?_=1${fq}${kpiRange}`),
+            fetchJsonNoCache(`/api/cost/daily?_=1${fq}${kpiRange}`),
+            safeFetch(`/api/cost/projection?_=1${fq}${projectionTf}${kpiRange}`, null),
             safeFetch('/api/today-cost', {today_cost: 0}),
             safeFetch('/api/ratelimits', {entries:[]}),
-            fetch('/api/balance').then(r=>r.json()),
+            fetchJsonNoCache('/api/balance'),
+            fetchJsonNoCache('/api/resources'),
         ]);
         allData.summary=summary; allData.timeseries=timeseries; allData.calls=calls;
         allData.models=models; allData.tools=tools; allData.costDaily=costDaily; allData.costProjection=costProjection;
-        allData.todayCost=todayCost; allData.ratelimits=ratelimits; allData.balance=balance;
+        allData.todayCost=todayCost; allData.ratelimits=ratelimits; allData.balance=balance; allData.resources=resources;
         await renderDashboard();
     } catch(e) { showToast('Filter failed: '+e.message,'error'); }
 }
@@ -718,13 +760,15 @@ function renderBalance() {
         card.className = 'balance-card';
 
         const hasProjects = data.projects && Object.keys(data.projects).length > 0;
+        const allowManualLedger = String(name).toLowerCase() !== 'moonshot';
+        const forceProviderBalance = String(name).toLowerCase() === 'moonshot' && data.balance_source === 'api';
         const curProj = selectedProject[name] || '__all__';
 
         // Determine what data to display based on project selection
         let displayData = data;
         let displayLedger = Array.isArray(data.ledger) ? data.ledger : [];
         let activeProject = null;
-        if (hasProjects && curProj !== '__all__' && data.projects[curProj]) {
+        if (hasProjects && !forceProviderBalance && curProj !== '__all__' && data.projects[curProj]) {
             activeProject = curProj;
             displayData = data.projects[curProj];
             displayLedger = Array.isArray(displayData.ledger) ? displayData.ledger : [];
@@ -775,7 +819,8 @@ function renderBalance() {
             html += `<option value="__all__"${curProj==='__all__'?' selected':''}>All Projects ($${data.remaining.toFixed(2)})</option>`;
             for (const pn of projNames) {
                 const pr = data.projects[pn];
-                html += `<option value="${pn}"${curProj===pn?' selected':''}>${pn} ($${pr.remaining.toFixed(2)})</option>`;
+                const projRemaining = forceProviderBalance ? data.remaining : pr.remaining;
+                html += `<option value="${pn}"${curProj===pn?' selected':''}>${pn} ($${projRemaining.toFixed(2)})</option>`;
             }
             html += `</select>`;
         }
@@ -790,22 +835,28 @@ function renderBalance() {
                 <div class="balance-ledger-toggle" onclick="document.getElementById('${ledgerId}').classList.toggle('open');this.textContent=this.textContent.includes('+')?'- Hide deposits':'+ Deposits (${displayLedger.length})'">+ Deposits (${displayLedger.length})</div>
                 <div class="balance-ledger-entries" id="${ledgerId}">`;
             if (hasLedgerEntries) {
+                const projectEntryIndices = {};
                 displayLedger.forEach((e, idx) => {
                     const cls = e.is_voucher ? 'balance-ledger-voucher' : '';
                     const projTag = (!activeProject && e.project) ? `<span style="color:var(--text-secondary);font-size:10px;">[${e.project}]</span> ` : '';
                     const deleteProject = activeProject || e.project || '';
+                    let deleteIndex = idx;
+                    if (deleteProject) {
+                        deleteIndex = projectEntryIndices[deleteProject] || 0;
+                        projectEntryIndices[deleteProject] = deleteIndex + 1;
+                    }
                     html += `<div class="balance-ledger-entry ${cls}">
                         <span class="balance-ledger-date">${e.date}</span>
                         <span class="balance-ledger-note">${projTag}${e.note||''}</span>
                         <span class="balance-ledger-amount">${e.is_voucher?'':'+'}\$${(e.amount||0).toFixed(2)}${e.is_voucher?' (voucher)':''}</span>
-                        <button class="ledger-delete-btn" onclick="deleteLedgerEntry('${name}',${idx},'${deleteProject}')" title="Remove this entry">&times;</button>
+                        ${allowManualLedger ? `<button class="ledger-delete-btn" onclick="deleteLedgerEntry('${name}',${deleteIndex},'${deleteProject}')" title="Remove this entry">&times;</button>` : ''}
                     </div>`;
                 });
             }
             html += `</div></div>`;
 
             // Top-up form — for multi-project, include project selector
-            if (!hasApiKey) {
+            if (!hasApiKey && allowManualLedger) {
                 if (hasProjects) {
                     const projNames = Object.keys(data.projects);
                     html += `<div class="balance-topup"><div class="topup-fields">
@@ -814,12 +865,14 @@ function renderBalance() {
                         </select>
                         <input type="number" class="topup-input topup-amount" placeholder="$" step="0.01" min="0.01" id="topup-amount-${name}">
                         <input type="text" class="topup-input topup-note" placeholder="Note" id="topup-note-${name}">
+                        <input type="date" class="topup-input" id="topup-date-${name}" title="Top-up date (leave empty for today)">
                         <button class="btn primary topup-btn" onclick="submitTopup('${name}',this)">Add</button>
                     </div></div>`;
                 } else {
                     html += `<div class="balance-topup"><div class="topup-fields">
                         <input type="number" class="topup-input topup-amount" placeholder="$" step="0.01" min="0.01" id="topup-amount-${name}">
                         <input type="text" class="topup-input topup-note" placeholder="Note" id="topup-note-${name}">
+                        <input type="date" class="topup-input" id="topup-date-${name}" title="Top-up date (leave empty for today)">
                         <button class="btn primary topup-btn" onclick="submitTopup('${name}',this)">Add</button>
                     </div></div>`;
                 }
@@ -867,9 +920,14 @@ function switchProject(provider, projectName) {
 }
 
 async function submitTopup(provider, btn) {
+    if (String(provider).toLowerCase() === 'moonshot') {
+        showToast('Manual Moonshot ledger edits are disabled.', 'error');
+        return;
+    }
     const amountInput = document.getElementById(`topup-amount-${provider}`);
     const noteInput = document.getElementById(`topup-note-${provider}`);
     const projectSelect = document.getElementById(`topup-project-${provider}`);
+    const dateInput = document.getElementById(`topup-date-${provider}`);
     const amount = parseFloat(amountInput.value);
     if (!amount || amount <= 0) { showToast('Enter a valid amount','error'); return; }
     const project = projectSelect ? projectSelect.value : undefined;
@@ -877,13 +935,14 @@ async function submitTopup(provider, btn) {
     try {
         const body = {provider, amount, note: noteInput.value || ''};
         if (project) body.project = project;
+        if (dateInput && dateInput.value) body.topup_date = dateInput.value;
         const resp = await fetch('/api/balance/topup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
         const data = await resp.json();
         if (data.error) showToast(data.error,'error');
         else {
             showToast(`Added $${amount.toFixed(2)} to ${provider}${project ? '/'+project : ''}`,'success');
             amountInput.value=''; noteInput.value='';
-            allData.balance = await fetch('/api/balance').then(r=>r.json());
+            allData.balance = await fetchJsonNoCache('/api/balance');
             renderBalance();
         }
     } catch(e) { showToast('Failed: '+e.message,'error'); }
@@ -1427,6 +1486,10 @@ function renderProjection() {
 // LEDGER DELETE
 // ============================================================================
 async function deleteLedgerEntry(provider, index, project) {
+    if (String(provider).toLowerCase() === 'moonshot') {
+        showToast('Manual Moonshot ledger edits are disabled.', 'error');
+        return;
+    }
     const label = project ? `${provider}/${project}` : provider;
     if (!confirm(`Remove this ledger entry from ${label}?`)) return;
     try {
@@ -1440,7 +1503,7 @@ async function deleteLedgerEntry(provider, index, project) {
         const data = await resp.json();
         if (data.error) { showToast(data.error, 'error'); return; }
         showToast(`Removed $${(data.removed.amount||0).toFixed(2)} from ${label}`, 'success');
-        allData.balance = await fetch('/api/balance').then(r => r.json());
+        allData.balance = await fetchJsonNoCache('/api/balance');
         renderBalance();
     } catch(e) { showToast('Failed: ' + e.message, 'error'); }
 }

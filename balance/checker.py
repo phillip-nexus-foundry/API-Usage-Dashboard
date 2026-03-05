@@ -8,7 +8,8 @@ import os
 import httpx
 import sqlite3
 import logging
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,20 @@ class BalanceChecker:
     @staticmethod
     def _utc_now() -> datetime:
         return datetime.now(timezone.utc)
+
+    @staticmethod
+    def _calibration_since_ms(cal_date: Optional[str]) -> Optional[int]:
+        """Return epoch-ms for start of the local day after calibration date."""
+        if not cal_date:
+            return None
+        try:
+            local_tz = datetime.now().astimezone().tzinfo
+            cal_dt = datetime.strptime(str(cal_date), "%Y-%m-%d").replace(
+                tzinfo=local_tz
+            ) + timedelta(days=1)
+            return int(cal_dt.timestamp() * 1000)
+        except Exception:
+            return None
 
     async def check_balances(self, reader) -> Dict[str, Any]:
         """Check balances for all providers configured under balance: in config."""
@@ -55,8 +70,30 @@ class BalanceChecker:
                 api_result = await self._check_api(name, cfg)
                 if api_result.get("remaining") is not None:
                     api_balance = api_result["remaining"]
+                    # Guard against zero-valued API responses clobbering a
+                    # positive computed project balance (observed on Moonshot).
+                    if (
+                        name == "moonshot"
+                        and isinstance(api_balance, (int, float))
+                        and float(api_balance) == 0.0
+                        and float(result.get("remaining", 0.0)) > 0.0
+                    ):
+                        result["balance_source"] = "ledger"
+                        result["api_note"] = "Moonshot API returned 0; kept computed project balance."
+                        return result
                     result["remaining"] = api_balance
                     result["balance_source"] = "api"
+                    # Keep project-level values aligned with API balance when this
+                    # provider has a single project (Moonshot common case).
+                    projects = result.get("projects")
+                    if isinstance(projects, dict) and len(projects) == 1:
+                        only_project = next(iter(projects.values()))
+                        if isinstance(only_project, dict):
+                            total_deposits = float(only_project.get("total_deposits") or 0.0)
+                            only_project["remaining"] = round(float(api_balance), 2)
+                            only_project["cumulative_cost"] = round(
+                                total_deposits - float(api_balance), 6
+                            )
                     # Recalculate status based on live balance
                     warn = cfg.get("warn_threshold", 10.0)
                     crit = cfg.get("critical_threshold", 2.0)
@@ -66,9 +103,30 @@ class BalanceChecker:
                         result["status"] = "warn"
                     else:
                         result["status"] = "ok"
+                    if isinstance(projects, dict) and len(projects) == 1:
+                        only_project = next(iter(projects.values()))
+                        if isinstance(only_project, dict):
+                            if api_balance <= crit:
+                                only_project["status"] = "critical"
+                            elif api_balance <= warn:
+                                only_project["status"] = "warn"
+                            else:
+                                only_project["status"] = "ok"
                 else:
                     result["balance_source"] = "ledger"
                     result["api_note"] = api_result.get("message", "API unavailable")
+                    scraped = self._latest_scraped_balance(reader.db_path, name)
+                    if scraped is not None:
+                        result["remaining"] = round(scraped, 2)
+                        result["balance_source"] = "scraped"
+                        warn = cfg.get("warn_threshold", 10.0)
+                        crit = cfg.get("critical_threshold", 2.0)
+                        if scraped <= crit:
+                            result["status"] = "critical"
+                        elif scraped <= warn:
+                            result["status"] = "warn"
+                        else:
+                            result["status"] = "ok"
             return result
 
         # If provider has an api_key_env, try API first
@@ -81,6 +139,18 @@ class BalanceChecker:
             if "ledger" in cfg:
                 ledger_result = self._check_ledger(name, cfg, reader)
                 ledger_result["api_note"] = api_result.get("message", "API unavailable")
+                scraped = self._latest_scraped_balance(reader.db_path, name)
+                if scraped is not None:
+                    ledger_result["remaining"] = round(scraped, 2)
+                    ledger_result["balance_source"] = "scraped"
+                    warn = cfg.get("warn_threshold", 10.0)
+                    crit = cfg.get("critical_threshold", 2.0)
+                    if scraped <= crit:
+                        ledger_result["status"] = "critical"
+                    elif scraped <= warn:
+                        ledger_result["status"] = "warn"
+                    else:
+                        ledger_result["status"] = "ok"
                 return ledger_result
             return api_result
 
@@ -92,6 +162,33 @@ class BalanceChecker:
             "status": "not_configured",
             "message": f"No ledger or api_key_env configured for {name}",
         }
+
+    @staticmethod
+    def _latest_scraped_balance(db_path: str, provider: str) -> Optional[float]:
+        """Use latest non-error snapshot value as API fallback when available."""
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    """
+                    SELECT balance_amount, balance_source
+                    FROM resource_snapshots
+                    WHERE provider = ?
+                      AND balance_amount IS NOT NULL
+                      AND balance_source IN ('browser_poll', 'cdp_scrape')
+                    ORDER BY timestamp DESC
+                    LIMIT 1
+                    """,
+                    (provider,),
+                ).fetchone()
+            if not row:
+                return None
+            value = float(row["balance_amount"])
+            if value <= 0:
+                return None
+            return value
+        except Exception:
+            return None
 
     def _check_provider_with_projects(
         self, name: str, cfg: Dict[str, Any], reader
@@ -115,10 +212,18 @@ class BalanceChecker:
                 proj_deposits = sum(entry.get("amount", 0) for entry in ledger)
                 proj_models = proj_cfg.get("models", [])
                 proj_cost = self._get_models_cost(reader, proj_models) if proj_models else 0.0
-                # Allow verified_usage_cost override at project level (same as provider level)
+                # verified_usage_cost acts as baseline + incremental DB cost since calibration date.
                 if proj_cfg.get("verified_usage_cost") is not None:
                     try:
-                        proj_cost = float(proj_cfg["verified_usage_cost"])
+                        baseline = float(proj_cfg["verified_usage_cost"])
+                        since_ms = self._calibration_since_ms(proj_cfg.get("verified_usage_date"))
+                        if since_ms and proj_models:
+                            incremental = self._get_models_cost_since(reader, proj_models, since_ms)
+                        elif since_ms:
+                            incremental = self._get_provider_cost_since(reader, name, since_ms)
+                        else:
+                            incremental = 0.0
+                        proj_cost = baseline + incremental
                     except (TypeError, ValueError):
                         pass
                 proj_remaining = proj_deposits - proj_cost
@@ -211,7 +316,13 @@ class BalanceChecker:
 
             if cfg.get("verified_usage_cost") is not None:
                 try:
-                    cumulative_cost = float(cfg.get("verified_usage_cost"))
+                    baseline = float(cfg.get("verified_usage_cost"))
+                    since_ms = self._calibration_since_ms(cfg.get("verified_usage_date"))
+                    incremental = (
+                        self._get_provider_cost_since(reader, provider_name, since_ms)
+                        if since_ms else 0.0
+                    )
+                    cumulative_cost = baseline + incremental
                     cost_source = "verified_override"
                 except (TypeError, ValueError):
                     cumulative_cost = raw_cumulative_cost
@@ -273,11 +384,42 @@ class BalanceChecker:
             )
             return cursor.fetchone()[0]
 
+    def _get_provider_cost_since(self, reader, provider_name: str, since_ms: int) -> float:
+        """Get provider cost since a given epoch-ms timestamp."""
+        aliases = _PROVIDER_ALIASES.get(provider_name, [provider_name])
+        placeholders = ",".join("?" * len(aliases))
+        params = [*aliases, since_ms]
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE provider IN ({placeholders}) AND timestamp >= ?",
+                params,
+            )
+            return cursor.fetchone()[0]
+
+    def _get_models_cost_since(self, reader, models: list, since_ms: int) -> float:
+        """Get model-group cost since a given epoch-ms timestamp."""
+        if not models:
+            return 0.0
+        placeholders = ",".join("?" * len(models))
+        params = [*models, since_ms]
+        with sqlite3.connect(reader.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE model IN ({placeholders}) AND timestamp >= ?",
+                params,
+            )
+            return cursor.fetchone()[0]
+
     async def _check_api(self, name: str, cfg: Dict[str, Any]) -> Dict[str, Any]:
         """Check balance via provider API. Returns result with remaining or error."""
         try:
             api_key_env = cfg["api_key_env"]
-            api_key = os.environ.get(api_key_env)
+            api_key = (
+                os.environ.get(api_key_env)
+                or cfg.get("api_key")
+                or self.config.get("moonshot_api_key")
+            )
 
             if not api_key:
                 return {
@@ -285,33 +427,46 @@ class BalanceChecker:
                     "message": f"Set {api_key_env} env var",
                 }
 
-            api_endpoint = cfg.get(
-                "api_endpoint", self._default_endpoint(name)
-            )
-            if not api_endpoint:
+            api_endpoint = cfg.get("api_endpoint", self._default_endpoint(name))
+            api_endpoints = [api_endpoint] if isinstance(api_endpoint, str) else []
+            if name == "moonshot":
+                # Try both known Moonshot domains for compatibility.
+                if "https://api.moonshot.ai/v1/users/me/balance" not in api_endpoints:
+                    api_endpoints.insert(0, "https://api.moonshot.ai/v1/users/me/balance")
+                if "https://api.moonshot.cn/v1/users/me/balance" not in api_endpoints:
+                    api_endpoints.append("https://api.moonshot.cn/v1/users/me/balance")
+            if not api_endpoints:
                 return {
                     "status": "no_endpoint",
                     "message": f"No API endpoint for {name}",
                 }
-
+            last_error = None
+            data = None
             async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    api_endpoint,
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=5.0,
-                )
-
-                if response.status_code in (401, 403):
-                    return {
-                        "status": "auth_error",
-                        "message": "Token invalid or expired",
-                    }
-
-                response.raise_for_status()
-                data = response.json()
+                for endpoint in api_endpoints:
+                    try:
+                        response = await client.get(
+                            endpoint,
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            timeout=5.0,
+                        )
+                        if response.status_code in (401, 403):
+                            return {
+                                "status": "auth_error",
+                                "message": "Token invalid or expired",
+                            }
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except Exception as endpoint_exc:
+                        last_error = endpoint_exc
+            if data is None:
+                raise last_error or RuntimeError("API response unavailable")
 
             # Parse balance from response (provider-specific path)
             balance = self._parse_balance_response(name, data)
+            if balance is None:
+                raise ValueError("Balance field missing in API response")
 
             warn_threshold = cfg.get("warn_threshold", 10.0)
             critical_threshold = cfg.get("critical_threshold", 2.0)
@@ -340,17 +495,46 @@ class BalanceChecker:
     def _default_endpoint(self, provider_name: str) -> Optional[str]:
         """Default API endpoints for known providers."""
         defaults = {
-            "moonshot": "https://api.moonshot.cn/v1/users/me/balance",
+            "moonshot": "https://api.moonshot.ai/v1/users/me/balance",
         }
         return defaults.get(provider_name)
 
-    def _parse_balance_response(self, provider_name: str, data: dict) -> float:
+    def _parse_balance_response(self, provider_name: str, data: dict) -> Optional[float]:
         """Extract balance value from provider-specific API response format."""
+        def _coerce_num(value: Any) -> Optional[float]:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                try:
+                    return float(value)
+                except Exception:
+                    return None
+            if isinstance(value, str):
+                txt = value.strip().replace(",", "")
+                # Handle formatted currency text like "US$ 1.17".
+                m = re.search(r"-?\d+(?:\.\d+)?", txt)
+                if not m:
+                    return None
+                try:
+                    return float(m.group(0))
+                except Exception:
+                    return None
+            return None
+
         if provider_name == "moonshot":
-            return data.get("data", {}).get("balance", 0.0)
+            payload = data.get("data", {}) if isinstance(data, dict) else {}
+            # Prefer available/remaining-style fields over raw balance fields.
+            for key in ("available_balance", "available", "remain", "remaining", "balance"):
+                value = payload.get(key) if isinstance(payload, dict) else None
+                if value is None and isinstance(data, dict):
+                    value = data.get(key)
+                num = _coerce_num(value)
+                if num is not None:
+                    return num
+            return None
         # Generic fallback: look for common fields
         if "balance" in data:
-            return float(data["balance"])
-        if "data" in data and "balance" in data["data"]:
-            return float(data["data"]["balance"])
-        return 0.0
+            return _coerce_num(data.get("balance"))
+        if "data" in data and isinstance(data.get("data"), dict) and "balance" in data["data"]:
+            return _coerce_num(data["data"].get("balance"))
+        return None

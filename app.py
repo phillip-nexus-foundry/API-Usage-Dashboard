@@ -229,10 +229,18 @@ async def lifespan(_app: FastAPI):
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 
-    logger.info("Scanning session files...")
-    reader.scan()
-    if reader.parse_errors:
-        logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
+    logger.info("Starting background session scan...")
+
+    async def _initial_scan():
+        try:
+            await asyncio.to_thread(reader.scan)
+            if reader.parse_errors:
+                logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
+            logger.info("Initial background scan complete")
+        except Exception as e:
+            logger.error(f"Initial background scan failed: {e}")
+
+    asyncio.create_task(_initial_scan())
 
     # File watcher: auto-scan when session files change
     class SessionFileHandler(FileSystemEventHandler):
@@ -1033,6 +1041,30 @@ async def balance():
     # Prefer latest scraped balances when available to keep cards live without API keys.
     # Skip providers whose poller returns "api_only" (no browser scraping).
     for provider_name, provider_data in balances.items():
+        # Preserve live billing API results; do not overwrite with browser snapshots.
+        if provider_data.get("balance_source") == "api":
+            # Keep project-level values aligned with API balance for single-project providers.
+            projects = provider_data.get("projects")
+            if isinstance(projects, dict) and len(projects) == 1:
+                only_project = next(iter(projects.values()))
+                if isinstance(only_project, dict) and provider_data.get("remaining") is not None:
+                    only_project["remaining"] = round(float(provider_data["remaining"]), 2)
+                    if only_project.get("total_deposits") is not None:
+                        only_project["cumulative_cost"] = round(
+                            float(only_project["total_deposits"]) - float(only_project["remaining"]),
+                            6,
+                        )
+                        only_project["usage_cost"] = only_project["cumulative_cost"]
+                    crit = float(provider_data.get("critical_threshold", 2.0))
+                    warn = float(provider_data.get("warn_threshold", 10.0))
+                    rem = float(only_project["remaining"])
+                    if rem <= crit:
+                        only_project["status"] = "critical"
+                    elif rem <= warn:
+                        only_project["status"] = "warn"
+                    else:
+                        only_project["status"] = "ok"
+            continue
         snapshot = snapshots.get(provider_name)
         if not snapshot:
             continue
@@ -1063,6 +1095,31 @@ async def balance():
                         6,
                     )
                     only_project["usage_cost"] = only_project["cumulative_cost"]
+
+    # Final consistency pass: for Moonshot API mode, keep single-project
+    # display values aligned with provider-level API remaining.
+    moonshot_data = balances.get("moonshot")
+    if isinstance(moonshot_data, dict) and moonshot_data.get("balance_source") == "api":
+        projects = moonshot_data.get("projects")
+        if isinstance(projects, dict) and len(projects) == 1 and moonshot_data.get("remaining") is not None:
+            only_project = next(iter(projects.values()))
+            if isinstance(only_project, dict):
+                only_project["remaining"] = round(float(moonshot_data["remaining"]), 2)
+                if only_project.get("total_deposits") is not None:
+                    only_project["cumulative_cost"] = round(
+                        float(only_project["total_deposits"]) - float(only_project["remaining"]),
+                        6,
+                    )
+                    only_project["usage_cost"] = only_project["cumulative_cost"]
+                crit = float(moonshot_data.get("critical_threshold", 2.0))
+                warn = float(moonshot_data.get("warn_threshold", 10.0))
+                rem = float(only_project["remaining"])
+                if rem <= crit:
+                    only_project["status"] = "critical"
+                elif rem <= warn:
+                    only_project["status"] = "warn"
+                else:
+                    only_project["status"] = "ok"
 
     return balances
 
@@ -1226,6 +1283,8 @@ async def resources():
         return {"reset_at": reset_at, "remaining_seconds": int(remaining_seconds)}
 
     response_providers: Dict[str, Dict[str, Any]] = {}
+    usage_allow_fallback = bool(CONFIG.get("usage_allow_fallback", False))
+    allow_stale_window_scrape = bool(CONFIG.get("allow_stale_window_scrape", False))
     for provider_key, provider_def in provider_defs.items():
         usage_5h = _window_usage(provider_def["usage_provider_aliases"], five_hour_start)
         usage_1w = _window_usage(provider_def["usage_provider_aliases"], one_week_start)
@@ -1261,13 +1320,13 @@ async def resources():
             spend_limit = usage_payload.get("spend_limit") if isinstance(usage_payload, dict) else None
             spend_reset_text = usage_payload.get("spend_reset_text") if isinstance(usage_payload, dict) else None
             extra_balance = usage_payload.get("extra_usage_balance") if isinstance(usage_payload, dict) else None
-            if spend_used is None:
+            if usage_allow_fallback and spend_used is None:
                 spend_used = fallback.get("spend_used")
-            if spend_limit is None:
+            if usage_allow_fallback and spend_limit is None:
                 spend_limit = fallback.get("spend_limit", extra_limit)
-            if spend_reset_text is None:
+            if usage_allow_fallback and spend_reset_text is None:
                 spend_reset_text = fallback.get("spend_reset_text")
-            if extra_balance is None:
+            if usage_allow_fallback and extra_balance is None:
                 extra_balance = fallback.get("extra_usage_balance")
             if isinstance(extra_balance, (int, float)):
                 extra_value = round(float(extra_balance), 2)
@@ -1287,6 +1346,11 @@ async def resources():
         scraped_reset_1w = None
         raw_payload = (snapshot.get("raw_payload") or {}) if snapshot else {}
 
+        # Track data source for UI indicators
+        data_source = "telemetry"  # default
+        if snapshot:
+            data_source = snapshot.get("balance_source", "telemetry")
+        
         if provider_key == "anthropic":
             claude_usage = raw_payload.get("claude_usage") or {}
             if isinstance(claude_usage, dict):
@@ -1294,8 +1358,11 @@ async def resources():
                 scraped_pct_1w = claude_usage.get("weekly_pct")
                 scraped_reset_5h = claude_usage.get("plan_usage_reset")
                 scraped_reset_1w = claude_usage.get("weekly_reset")
+                # Check if using fallback values
+                if claude_usage.get("source") == "fallback" or claude_usage.get("fallback_last_updated"):
+                    data_source = "fallback"
             # If current scrape returned nulls, look back for last good values
-            if scraped_pct_5h is None or scraped_pct_1w is None:
+            if allow_stale_window_scrape and (scraped_pct_5h is None or scraped_pct_1w is None):
                 last_good = _find_last_good_window_scrape(provider_key)
                 if last_good:
                     if scraped_pct_5h is None:
@@ -1317,8 +1384,11 @@ async def resources():
                 if rem_1w is not None:
                     scraped_pct_1w = 100 - int(rem_1w)
                 scraped_reset_1w = codex_usage.get("weekly_reset")
+                # Check if using fallback values
+                if codex_usage.get("source") == "fallback" or codex_usage.get("fallback_last_updated"):
+                    data_source = "fallback"
             # If current scrape returned nulls, look back for last good values
-            if scraped_pct_5h is None or scraped_pct_1w is None:
+            if allow_stale_window_scrape and (scraped_pct_5h is None or scraped_pct_1w is None):
                 last_good = _find_last_good_window_scrape(provider_key)
                 if last_good:
                     if scraped_pct_5h is None and last_good.get("five_hour_remaining_pct") is not None:
@@ -1378,6 +1448,7 @@ async def resources():
             "total_credits": round(float(total_credits), 2) if total_credits is not None else None,
             "pricing_notes": provider_def.get("pricing_notes"),
             "error": (snapshot.get("error") if (snapshot and show_scrape_errors) else None),
+            "data_source": data_source,
         }
 
     # Enforce exclusion of balance-only providers (e.g. minimax, moonshot)
@@ -1410,9 +1481,15 @@ async def balance_topup(
 
     balance_cfg = CONFIG.get("balance", {})
     provider_cfg = balance_cfg.get(provider)
+    provider_key = str(provider).strip().lower()
 
     if provider_cfg is None:
         return {"error": f"Unknown provider: {provider}", "status": 400}
+    if provider_key == "moonshot":
+        return {
+            "error": "Manual Moonshot ledger edits are disabled. Moonshot must be tracked from live API balance only.",
+            "status": 400,
+        }
 
     if amount <= 0:
         return {"error": "Amount must be positive", "status": 400}
@@ -1476,9 +1553,15 @@ async def balance_topup_delete(
 
     balance_cfg = CONFIG.get("balance", {})
     provider_cfg = balance_cfg.get(provider)
+    provider_key = str(provider).strip().lower()
 
     if provider_cfg is None:
         return {"error": f"Unknown provider: {provider}", "status": 400}
+    if provider_key == "moonshot":
+        return {
+            "error": "Manual Moonshot ledger edits are disabled. Moonshot must be tracked from live API balance only.",
+            "status": 400,
+        }
 
     # Determine which ledger to operate on
     if provider_cfg.get("projects"):
@@ -2145,11 +2228,128 @@ async def spendlimits_update(
 @app.post("/api/refresh")
 async def refresh():
     """
-    Force full re-scan of session files.
+    Force full refresh: scan telemetry + poll resources + recompute balances.
     """
     logger.info("Manual refresh triggered")
+    _reload_config_from_disk()
     reader.scan()
-    return {"status": "refreshed", "parse_errors": len(reader.parse_errors)}
+    poll_results = await _run_resource_poll()
+    balances = await balance_checker.check_balances(reader)
+    return {
+        "status": "refreshed",
+        "refresh_version": "2026-03-05-codex-moonfix",
+        "parse_errors": len(reader.parse_errors),
+        "polled": len(poll_results),
+        "polled_providers": [p.get("provider") for p in poll_results if isinstance(p, dict)],
+        "balance_providers": sorted(list(balances.keys())),
+    }
+
+
+# ============================================================================
+# CLAUDE CODE & CODEX CLI FALLBACK MANAGEMENT
+# ============================================================================
+
+@app.get("/api/fallback/usage")
+async def get_fallback_usage():
+    """
+    Get current fallback values for Claude Code and Codex CLI usage.
+    These are used when browser CDP scraping is unavailable.
+    """
+    _reload_config_from_disk()
+    return {
+        "build_tag": "moonshot-ledger-lock-2026-03-05",
+        "claude_code": CONFIG.get("claude_usage_fallback", {}),
+        "codex_cli": CONFIG.get("codex_usage_fallback", {}),
+    }
+
+
+@app.post("/api/fallback/usage/claude")
+async def update_claude_fallback(
+    spend_used: Optional[float] = Body(None),
+    spend_limit: Optional[float] = Body(None),
+    spend_reset_text: Optional[str] = Body(None),
+    extra_usage_balance: Optional[float] = Body(None),
+    plan_usage_pct: Optional[int] = Body(None),
+    weekly_pct: Optional[int] = Body(None),
+):
+    """
+    Update fallback values for Claude Code usage.
+    These values are used when browser CDP scraping fails or is disabled.
+    """
+    global CONFIG
+    
+    if "claude_usage_fallback" not in CONFIG:
+        CONFIG["claude_usage_fallback"] = {}
+    
+    fallback = CONFIG["claude_usage_fallback"]
+    
+    if spend_used is not None:
+        fallback["spend_used"] = round(spend_used, 2)
+    if spend_limit is not None:
+        fallback["spend_limit"] = round(spend_limit, 2)
+    if spend_reset_text is not None:
+        fallback["spend_reset_text"] = spend_reset_text
+    if extra_usage_balance is not None:
+        fallback["extra_usage_balance"] = round(extra_usage_balance, 2)
+    if plan_usage_pct is not None:
+        fallback["plan_usage_pct"] = plan_usage_pct
+    if weekly_pct is not None:
+        fallback["weekly_pct"] = weekly_pct
+    
+    # Update timestamp
+    from datetime import datetime
+    fallback["last_updated"] = datetime.now().isoformat()
+    fallback["source"] = "manual_update"
+    
+    try:
+        with open(config_path, "w") as f:
+            yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        logger.error(f"Failed to write config.yaml: {e}")
+        return {"error": f"Failed to save: {e}", "status": 500}
+    
+    logger.info(f"Updated Claude Code fallback values: spend_used={spend_used}, extra_balance={extra_usage_balance}")
+    return {"status": "ok", "fallback": fallback}
+
+
+@app.post("/api/fallback/usage/codex")
+async def update_codex_fallback(
+    five_hour_remaining_pct: Optional[int] = Body(None),
+    weekly_remaining_pct: Optional[int] = Body(None),
+    weekly_reset: Optional[str] = Body(None),
+):
+    """
+    Update fallback values for Codex CLI usage.
+    These values are used when browser CDP scraping fails or is disabled.
+    """
+    global CONFIG
+    
+    if "codex_usage_fallback" not in CONFIG:
+        CONFIG["codex_usage_fallback"] = {}
+    
+    fallback = CONFIG["codex_usage_fallback"]
+    
+    if five_hour_remaining_pct is not None:
+        fallback["five_hour_remaining_pct"] = five_hour_remaining_pct
+    if weekly_remaining_pct is not None:
+        fallback["weekly_remaining_pct"] = weekly_remaining_pct
+    if weekly_reset is not None:
+        fallback["weekly_reset"] = weekly_reset
+    
+    # Update timestamp
+    from datetime import datetime
+    fallback["last_updated"] = datetime.now().isoformat()
+    fallback["source"] = "manual_update"
+    
+    try:
+        with open(config_path, "w") as f:
+            yaml.dump(CONFIG, f, default_flow_style=False, sort_keys=False)
+    except Exception as e:
+        logger.error(f"Failed to write config.yaml: {e}")
+        return {"error": f"Failed to save: {e}", "status": 500}
+    
+    logger.info(f"Updated Codex CLI fallback values: 5h_remaining={five_hour_remaining_pct}, weekly_remaining={weekly_remaining_pct}")
+    return {"status": "ok", "fallback": fallback}
 
 
 # ============================================================================

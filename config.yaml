@@ -6,10 +6,26 @@ sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
 claude_code_tier: pro
 claude_extra_usage_limit: 25.0
 claude_usage_fallback:
-  spend_used: 24.49
+  spend_used: 24.75
   spend_limit: 25.0
   spend_reset_text: Apr 1
-  extra_usage_balance: 0.51
+  extra_usage_balance: 0.25
+  plan_usage_pct: 95
+  weekly_pct: null
+  last_updated: '2026-03-04T20:23:09.030273'
+  source: manual_update
+codex_usage_fallback:
+  five_hour_remaining_pct: 80
+  weekly_remaining_pct: 60
+  weekly_reset: null
+  last_updated: '2026-03-04T20:23:12.504279'
+  source: manual_update
+elevenlabs_api_key: sk_10f001fedce804c6587064bc4b8369ae47e1b25ea986aa05
+usage_source_mode: auto
+usage_allow_fallback: false
+claude_oauth_credentials_path: C:/Users/AI-Agents/.claude/.credentials.json
+codex_sessions_path: C:/Users/AI-Agents/.codex/sessions
+usage_poll_timeout_seconds: 30
 scrape_error_stale_after_seconds: 900
 use_brave_cdp: true
 show_scrape_errors: false
@@ -22,6 +38,9 @@ balance:
     - date: '2026-02-27'
       amount: 30.0
       note: Tier 2 top up
+    - date: '2026-03-02'
+      amount: 20.0
+      note: Routine Top Up
     verified_usage_cost: 46.03
     verified_usage_date: '2026-03-01'
     verified_usage_note: Calibrated Mar 1 2026 against Anthropic console (USD 3.97
@@ -34,6 +53,12 @@ balance:
     - date: '2026-02-27'
       amount: 25.0
       note: Initial Deposit
+    - date: '2026-03-04'
+      amount: 5.0
+      note: Test date feature
+    - date: '2026-03-04'
+      amount: 2.5
+      note: Date feature test
     verified_usage_cost: 10.2
     verified_usage_date: '2026-03-01'
     verified_usage_note: Calibrated Mar 1 2026 against MiniMax console (USD 14.80
@@ -55,17 +80,17 @@ balance:
         verified_usage_note: Calibrated Mar 2 2026 against Moonshot console ($12.07
           remaining of $95 total deposits).
         ledger:
-        - date: '2026-02-01'
+        - date: '2026-02-14'
           amount: 20.0
           note: First top-up
-        - date: '2026-02-01'
+        - date: '2026-02-14'
           amount: 20.0
           note: Second top-up
-        - date: '2026-02-01'
+        - date: '2026-02-14'
           amount: 5.0
           note: Free voucher (not personal funds)
           is_voucher: true
-        - date: '2026-02-15'
+        - date: '2026-02-23'
           amount: 50.0
           note: Third top-up
 model_costs:

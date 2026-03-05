@@ -34,3 +34,10 @@
 - Do not over-engineer, but do not fake results either.
 - If a feature cannot be made to work in the current session, say so clearly and document what remains.
 - The user is cost-conscious with limited API tokens and rate limits. Wasting those on fake fixes is unacceptable.
+
+## 2026-03-05 Moonshot Balance Consistency Note
+
+- Incident: Moonshot provider-level API balance was correct, but single-project display value drifted (10x mismatch observed).
+- Root cause: mixed data sources in response/rendering path (API remaining vs computed project remaining).
+- Required invariant: when Moonshot `balance_source` is `api`, single-project remaining must be synchronized to provider-level remaining for both API response and UI card rendering.
+- Keep API values authoritative; do not let browser-scraped or computed project balances overwrite API-backed Moonshot values.
