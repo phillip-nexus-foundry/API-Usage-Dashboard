@@ -6,13 +6,17 @@ import json
 import os
 import logging
 import re
+import shutil
 import sqlite3
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 import yaml
+from websockets.sync.client import connect as ws_connect
 
 logger = logging.getLogger(__name__)
 
@@ -24,27 +28,20 @@ _BRAVE_CDP_URL = f"http://{_BRAVE_CDP_HOST}:{_BRAVE_CDP_PORT}"
 
 
 def _cdp_connect(playwright):
-    """Connect to Brave via CDP, handling Docker's Host header restriction.
-
-    Chrome DevTools HTTP server rejects requests where the Host header isn't
-    localhost/127.0.0.1.  When BRAVE_CDP_HOST differs (e.g. host.docker.internal),
-    we manually discover the WebSocket URL with a spoofed Host header, rewrite it
-    to use the real host, then connect via WebSocket directly.
-    """
+    """Connect to Brave via CDP, including non-localhost host-header handling."""
     if _BRAVE_CDP_HOST in ("127.0.0.1", "localhost"):
-        # Direct connection works fine on localhost
         return playwright.chromium.connect_over_cdp(_BRAVE_CDP_URL, timeout=10000)
 
-    # Discover the WS endpoint with correct Host header
-    import urllib.request
     req = urllib.request.Request(f"{_BRAVE_CDP_URL}/json/version")
     req.add_header("Host", f"127.0.0.1:{_BRAVE_CDP_PORT}")
-    resp = urllib.request.urlopen(req, timeout=10)
-    info = json.loads(resp.read().decode())
-    ws_url = info["webSocketDebuggerUrl"]
-    # Rewrite ws://127.0.0.1:9222/... to ws://host.docker.internal:9222/...
-    ws_url = ws_url.replace("127.0.0.1", _BRAVE_CDP_HOST)
-    return playwright.chromium.connect_over_cdp(ws_url, timeout=10000)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        info = json.loads(resp.read().decode())
+    ws_url = str(info.get("webSocketDebuggerUrl", ""))
+    if not ws_url:
+        raise RuntimeError("CDP /json/version missing webSocketDebuggerUrl")
+    return playwright.chromium.connect_over_cdp(
+        ws_url.replace("127.0.0.1", _BRAVE_CDP_HOST), timeout=10000
+    )
 
 _PROVIDER_ALIASES = {
     "minimax": ["minimax", "mini_max", "minimaxai"],
@@ -67,6 +64,7 @@ class BalancePoller:
     ):
         self.config = config
         self.db_path = db_path
+        Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.profiles_dir = Path(profiles_dir)
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.config_path = config_path
@@ -75,8 +73,60 @@ class BalancePoller:
         self.auto_correct = auto_correct
         self._ensure_tables()
 
+    @staticmethod
+    def _is_corrupt_db_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return any(
+            marker in text
+            for marker in (
+                "database disk image is malformed",
+                "file is not a database",
+                "file is encrypted or is not a database",
+            )
+        )
+
+    def _reset_corrupt_db(self, exc: Exception):
+        db_file = Path(self.db_path)
+        if db_file.exists():
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = db_file.with_name(f"{db_file.stem}.corrupt-{stamp}{db_file.suffix}")
+            try:
+                shutil.move(str(db_file), str(backup))
+                logger.error(
+                    "Quarantined corrupt BalancePoller DB '%s' to '%s' after error: %s",
+                    db_file,
+                    backup,
+                    exc,
+                )
+            except Exception as move_exc:
+                logger.error(
+                    "Failed to quarantine corrupt BalancePoller DB '%s': %s",
+                    db_file,
+                    move_exc,
+                )
+        self._create_tables()
+
+    def _with_db(self, operation, default=None):
+        try:
+            with sqlite3.connect(self.db_path) as conn:
+                return operation(conn)
+        except sqlite3.DatabaseError as exc:
+            if not self._is_corrupt_db_error(exc):
+                raise
+            self._reset_corrupt_db(exc)
+            with sqlite3.connect(self.db_path) as conn:
+                return operation(conn)
+
     def _ensure_tables(self):
         """Create required tables if they don't exist."""
+        try:
+            self._create_tables()
+        except sqlite3.DatabaseError as exc:
+            if not self._is_corrupt_db_error(exc):
+                raise
+            self._reset_corrupt_db(exc)
+
+    def _create_tables(self):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS resource_snapshots (
@@ -132,6 +182,15 @@ class BalancePoller:
     def refresh_config(self, config: Dict[str, Any]):
         self.config = config
 
+    def _usage_source_mode(self) -> str:
+        mode = str(self.config.get("usage_source_mode", "auto")).strip().lower()
+        if mode not in {"auto", "cdp", "rainmeter_port"}:
+            return "auto"
+        return mode
+
+    def _usage_fallback_enabled(self) -> bool:
+        return bool(self.config.get("usage_allow_fallback", False))
+
     async def poll_all(self, providers: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         provider_order = providers or ["anthropic", "elevenlabs", "codex_cli", "moonshot", "minimax"]
         results = []
@@ -149,17 +208,25 @@ class BalancePoller:
         return results
 
     async def poll_moonshot(self) -> Dict[str, Any]:
-        """Moonshot balance is tracked by the balance checker API — skip browser scraping."""
-        return self._build_snapshot(
+        return await self._poll_provider_page(
             provider="moonshot",
-            snapshot_type="usage_status",
-            balance_amount=0.0,
-            balance_currency="USD",
-            balance_source="api_only",
-            raw_response={"note": "Moonshot uses balance checker API, not browser scraping."},
+            url="https://platform.moonshot.ai/console/account",
+            selectors=[
+                "text=/[$¥]\\s*[0-9,.]+/",
+                ".balance",
+                "[class*='balance']",
+                "[class*='credit']",
+            ],
         )
 
     async def poll_anthropic(self) -> Dict[str, Any]:
+        """
+        Poll Anthropic balance and Claude Code usage.
+        
+        For Claude Code usage (spend limits, extra usage), tries:
+        1. Browser CDP scraping from claude.ai/settings/usage
+        2. Fallback values from config.yaml
+        """
         snapshot = await self._poll_provider_page(
             provider="anthropic",
             url="https://platform.claude.com/settings/billing",
@@ -169,12 +236,49 @@ class BalancePoller:
                 "text=/\\$\\s*[0-9,.]+/",
             ],
         )
-        # Enrich with Claude UI usage data (spend limit + extra usage balance) if available.
+        
+        # Enrich with Claude Code usage data (spend limit + extra usage balance)
         usage = await self._poll_claude_usage_page()
+        raw = snapshot.get("raw_response") or {}
+
+        # Get fallback values from config
+        fallback = self.config.get("claude_usage_fallback", {})
+
         if usage:
-            raw = snapshot.get("raw_response") or {}
+            # Merge with fallback for any missing values
+            for key in [
+                "spend_used",
+                "spend_limit",
+                "spend_reset_text",
+                "extra_usage_balance",
+                "plan_usage_pct",
+                "weekly_pct",
+                "plan_usage_reset",
+                "weekly_reset",
+            ]:
+                if (
+                    self._usage_fallback_enabled()
+                    and usage.get(key) is None
+                    and fallback.get(key) is not None
+                ):
+                    usage[key] = fallback[key]
+                    usage[f"{key}_source"] = "fallback"
             raw["claude_usage"] = usage
-            snapshot["raw_response"] = raw
+        else:
+            # Use fallback values entirely only when explicitly enabled.
+            if fallback and self._usage_fallback_enabled():
+                raw["claude_usage"] = {
+                    "spend_used": fallback.get("spend_used"),
+                    "spend_limit": fallback.get("spend_limit"),
+                    "spend_reset_text": fallback.get("spend_reset_text"),
+                    "extra_usage_balance": fallback.get("extra_usage_balance"),
+                    "plan_usage_pct": fallback.get("plan_usage_pct"),
+                    "weekly_pct": fallback.get("weekly_pct"),
+                    "source": "fallback",
+                    "fallback_last_updated": fallback.get("last_updated"),
+                }
+        
+        snapshot["raw_response"] = raw
         return snapshot
 
     async def poll_minimax(self) -> Dict[str, Any]:
@@ -193,7 +297,12 @@ class BalancePoller:
         XI_API_KEY or ELEVENLABS_API_KEY is set; falls back to browser scraping."""
 
         # --- Try API first (far more reliable than browser scraping) ---
-        api_key = os.environ.get("XI_API_KEY") or os.environ.get("ELEVENLABS_API_KEY") or "sk_10f001fedce804c6587064bc4b8369ae47e1b25ea986aa05"
+        api_key = (
+            os.environ.get("XI_API_KEY")
+            or os.environ.get("ELEVENLABS_API_KEY")
+            or self.config.get("elevenlabs_api_key")
+            or (self.config.get("balance", {}).get("elevenlabs", {}) or {}).get("api_key")
+        )
         if api_key:
             try:
                 async with httpx.AsyncClient() as client:
@@ -204,8 +313,9 @@ class BalancePoller:
                     )
                     resp.raise_for_status()
                     data = resp.json()
-                remaining = data.get("character_count", 0)
+                used = data.get("character_count", 0)
                 total = data.get("character_limit", 0)
+                remaining = float(total) - float(used) if total else 0
                 plan_name = data.get("tier", "").replace("_", " ").title() or None
                 return self._build_snapshot(
                     provider="elevenlabs",
@@ -215,79 +325,33 @@ class BalancePoller:
                     balance_source="api",
                     tier=plan_name,
                     total_credits=float(total) if total else None,
-                    raw_response={"source": "api", "character_count": remaining, "character_limit": total},
+                    raw_response={"source": "api", "character_count": used, "character_limit": total},
                 )
             except Exception as exc:
                 logger.warning("ElevenLabs API check failed, falling back to browser: %s", exc)
 
-        # --- Browser scraping fallback ---
-        try:
-            from playwright.async_api import async_playwright
-        except Exception:
-            return self._error_snapshot("elevenlabs", "playwright not installed")
-
+        # --- Browser CDP fallback (no Playwright dependency for value updates) ---
         url = "https://elevenlabs.io/app/subscription"
         raw_response: Dict[str, Any] = {"url": url}
         page_text = ""
         try:
-            async with async_playwright() as p:
-                profile_dir = str(self.profiles_dir / "elevenlabs")
-                context = await p.chromium.launch_persistent_context(
-                    user_data_dir=profile_dir,
-                    headless=True,
-                    viewport={"width": 1400, "height": 900},
-                )
-                page = await context.new_page()
-                await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                try:
-                    await page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:
-                    pass
-                # Wait for credits text to appear in the DOM
-                try:
-                    await page.wait_for_function(
-                        "() => document.body && /credit/i.test(document.body.innerText || '')",
-                        timeout=20000,
-                    )
-                except Exception:
-                    pass
-                await page.wait_for_timeout(3000)
-                page_text = await self._read_body_text(page, context)
-                raw_response["body_length"] = len(page_text or "")
-                raw_response["body_preview"] = (page_text or "")[:500]
-
-                # Try authenticated API call via browser session cookies.
-                try:
-                    sub_resp = await context.request.get(
-                        "https://api.elevenlabs.io/v1/user/subscription",
-                        timeout=10000,
-                    )
-                    if sub_resp.status == 200:
-                        data = await sub_resp.json()
-                        remaining = data.get("character_count", 0)
-                        total = data.get("character_limit", 0)
-                        plan_name = data.get("tier", "").replace("_", " ").title() or None
-                        await context.close()
-                        return self._build_snapshot(
-                            provider="elevenlabs",
-                            snapshot_type="full_status",
-                            balance_amount=float(remaining),
-                            balance_currency="credits",
-                            balance_source="browser_session_api",
-                            tier=plan_name,
-                            total_credits=float(total) if total else None,
-                            raw_response={"source": "browser_session_api", "character_count": remaining, "character_limit": total},
-                        )
-                except Exception:
-                    pass
-
-                await context.close()
-        except Exception as exc:
-            return self._error_snapshot(
-                "elevenlabs",
-                f"Browser scrape failed: {exc}",
-                raw_response=raw_response,
+            cdp_result = await asyncio.to_thread(
+                self._cdp_scrape_provider_sync,
+                url,
+                ["main", "[class*='credit']", "body"],
             )
+            if cdp_result.get("error"):
+                return self._error_snapshot(
+                    "elevenlabs",
+                    f"CDP scrape failed: {cdp_result['error']}",
+                    raw_response=raw_response,
+                )
+            page_text = cdp_result.get("page_text") or ""
+            raw_response["body_length"] = len(page_text)
+            raw_response["body_preview"] = page_text[:500]
+            raw_response["final_url"] = cdp_result.get("final_url", url)
+        except Exception as exc:
+            return self._error_snapshot("elevenlabs", f"CDP scrape failed: {exc}", raw_response=raw_response)
 
         # Detect login redirect (only if page is short / clearly a login form)
         if len(page_text or "") < 2000:
@@ -312,7 +376,7 @@ class BalancePoller:
             snapshot_type="full_status",
             balance_amount=parsed["remaining_credits"],
             balance_currency="credits",
-            balance_source="browser_poll",
+            balance_source="cdp_scrape",
             tier=parsed["plan_name"],
             total_credits=parsed["total_credits"],
             raw_response=raw_response,
@@ -320,42 +384,118 @@ class BalancePoller:
 
     async def poll_codex_cli(self) -> Dict[str, Any]:
         """
-        Scrape Codex CLI usage from chatgpt.com/codex/settings/usage via CDP.
-        Uses sync Playwright in a thread to avoid event loop conflicts with uvicorn.
-        Falls back to synthetic if CDP is unavailable or the page isn't open.
+        Fetch Codex CLI usage data.
+        
+        Tries multiple sources in order:
+        1. OpenAI API for subscription/credits info (if OPENAI_API_KEY is set)
+        2. Browser CDP scraping from chatgpt.com/codex/settings/usage
+        3. Fallback values from config.yaml
         """
-        use_cdp = bool(self.config.get("use_brave_cdp", False))
-        if not use_cdp:
-            return self._build_snapshot(
-                provider="codex_cli",
-                snapshot_type="usage_status",
-                balance_amount=0.0,
-                balance_currency="credits",
-                balance_source="synthetic",
-                raw_response={"note": "No direct Codex CLI endpoint; enable use_brave_cdp and open the usage page."},
-            )
-
         codex_data = {}
-        try:
-            codex_data = await asyncio.to_thread(self._cdp_scrape_codex_sync)
-            if codex_data.get("error"):
-                logger.info("CDP Codex scrape: %s", codex_data["error"])
-                codex_data = {}
-        except Exception as e:
-            logger.warning("Codex CLI CDP scrape thread failed: %s", e)
+        source = "none"
+        mode = self._usage_source_mode()
+
+        if mode in {"auto", "rainmeter_port"}:
+            try:
+                from balance.providers.codex_quota_usage import fetch_usage_payload
+
+                local_payload = await asyncio.to_thread(fetch_usage_payload, self.config)
+                if local_payload and not local_payload.get("error"):
+                    codex_data.update(local_payload)
+                    source = "local_sessions"
+                elif mode == "rainmeter_port":
+                    logger.info("Codex local parser unavailable: %s", local_payload.get("error"))
+            except Exception as e:
+                if mode == "rainmeter_port":
+                    logger.warning("Codex local parser failed: %s", e)
+
+        # Try OpenAI API first for billing/subscription info
+        openai_api_key = os.environ.get("OPENAI_API_KEY")
+        if openai_api_key:
+            try:
+                api_data = await self._fetch_openai_billing(openai_api_key)
+                if api_data:
+                    codex_data.update(api_data)
+                    source = "openai_api" if source == "none" else source
+                    logger.info("Codex CLI: Fetched data from OpenAI API")
+            except Exception as e:
+                logger.warning("Codex CLI: OpenAI API fetch failed: %s", e)
+
+        # Optional CDP fallback path for usage windows.
+        use_cdp = bool(self.config.get("use_brave_cdp", False))
+        if mode in {"auto", "cdp"} and use_cdp and codex_data.get("five_hour_remaining_pct") is None:
+            try:
+                cdp_data = await asyncio.to_thread(self._cdp_scrape_codex_sync)
+                if cdp_data and not cdp_data.get("error"):
+                    codex_data.update(cdp_data)
+                    source = "cdp_scrape"
+                    logger.info("Codex CLI: Fetched data from CDP scrape")
+                elif cdp_data.get("error"):
+                    logger.info("CDP Codex scrape: %s", cdp_data["error"])
+            except Exception as e:
+                logger.warning("Codex CLI CDP scrape thread failed: %s", e)
+        
+        # Apply fallback values from config if still missing data
+        fallback = self.config.get("codex_usage_fallback", {})
+        if fallback and self._usage_fallback_enabled():
+            for key in ["five_hour_remaining_pct", "weekly_remaining_pct", "weekly_reset"]:
+                if codex_data.get(key) is None and fallback.get(key) is not None:
+                    codex_data[key] = fallback[key]
+                    codex_data[f"{key}_source"] = "fallback"
+            # If we're using fallback as primary source
+            if source == "none" and fallback.get("last_updated"):
+                codex_data["fallback_last_updated"] = fallback.get("last_updated")
+                source = "fallback"
 
         raw = {
             "codex_usage": codex_data,
-            "source": "cdp_scrape",
+            "source": source,
         }
         return self._build_snapshot(
             provider="codex_cli",
             snapshot_type="usage_status",
             balance_amount=0.0,
             balance_currency="credits",
-            balance_source="cdp_scrape" if codex_data else "error",
+            balance_source=source,
             raw_response=raw,
         )
+    
+    async def _fetch_openai_billing(self, api_key: str) -> Optional[Dict[str, Any]]:
+        """Fetch OpenAI billing/subscription info to infer Codex CLI limits."""
+        result = {}
+        try:
+            async with httpx.AsyncClient() as client:
+                # Get subscription info
+                sub_resp = await client.get(
+                    "https://api.openai.com/v1/dashboard/billing/subscription",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10.0,
+                )
+                if sub_resp.status_code == 200:
+                    sub_data = sub_resp.json()
+                    result["subscription_plan"] = sub_data.get("plan", {}).get("id")
+                    result["billing_cycle_start"] = sub_data.get("billing_cycle", {}).get("start_date")
+                    result["billing_cycle_end"] = sub_data.get("billing_cycle", {}).get("end_date")
+                
+                # Get credit grants
+                credit_resp = await client.get(
+                    "https://api.openai.com/v1/dashboard/billing/credit_grants",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    timeout=10.0,
+                )
+                if credit_resp.status_code == 200:
+                    credit_data = credit_resp.json()
+                    grants = credit_data.get("grants", {}).get("data", [])
+                    total_credits = sum(g.get("amount", 0) for g in grants)
+                    used_credits = sum(g.get("used_amount", 0) for g in grants)
+                    result["total_credits"] = total_credits
+                    result["used_credits"] = used_credits
+                    result["remaining_credits"] = total_credits - used_credits
+        except Exception as e:
+            logger.warning("OpenAI billing API error: %s", e)
+            return None
+        
+        return result if result else None
 
     @staticmethod
     def _find_tab(browser, url_fragment: str):
@@ -368,96 +508,142 @@ class BalancePoller:
 
     @staticmethod
     def _cdp_scrape_claude_sync() -> Dict[str, Any]:
-        """Sync CDP scrape for Claude usage page. Runs in a thread to avoid
-        event loop conflicts with uvicorn."""
+        """CDP scrape for Claude usage page via DevTools WS (no Playwright)."""
         try:
-            from playwright.sync_api import sync_playwright
-        except Exception:
-            return {}
+            req = urllib.request.Request(f"{_BRAVE_CDP_URL}/json/list")
+            if _BRAVE_CDP_HOST not in ("127.0.0.1", "localhost"):
+                req.add_header("Host", f"127.0.0.1:{_BRAVE_CDP_PORT}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                targets = json.loads(resp.read().decode())
 
-        try:
-            with sync_playwright() as p:
-                browser = _cdp_connect(p)
-                page = None
-                for ctx in browser.contexts:
-                    for pg in ctx.pages:
-                        if "claude.ai/settings/usage" in (pg.url or ""):
-                            page = pg
-                            break
-                    if page:
-                        break
+            ws_url = None
+            for target in targets:
+                t_url = str(target.get("url", ""))
+                if "claude.ai/settings/usage" in t_url:
+                    ws_url = target.get("webSocketDebuggerUrl")
+                    break
+            if not ws_url:
+                return {"error": "Claude usage tab not open in Brave."}
+            if _BRAVE_CDP_HOST not in ("127.0.0.1", "localhost"):
+                ws_url = ws_url.replace("127.0.0.1", _BRAVE_CDP_HOST)
 
-                if not page:
-                    browser.close()
-                    return {"error": "Claude usage tab not open in Brave."}
+            script = r"""
+(() => {
+  const body = document.body ? (document.body.innerText || "") : "";
+  const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+  const parseAmount = (text) => {
+    if (!text) return null;
+    const normalized = String(text).replace(/[??]/g, "-").replace(/,/g, "");
+    const m = normalized.match(/([+-]?)\s*\$?\s*((?:\d+(?:\.\d+)?)|(?:\.\d+))/);
+    if (!m) return null;
+    const sign = m[1] === "-" ? -1 : 1;
+    const value = parseFloat(m[2]);
+    return Number.isFinite(value) ? sign * value : null;
+  };
+  const result = {
+    plan_usage_pct: null,
+    plan_usage_reset: null,
+    weekly_pct: null,
+    weekly_reset: null,
+    extra_usage_pct: null,
+    extra_usage_reset: null,
+    extra_usage_balance: null,
+    spend_used: null,
+    spend_limit: null,
+  };
+  const parseDollar = (text) => {
+    if (!text) return null;
+    const normalized = String(text).replace(/,/g, "");
+    const m = normalized.match(/\$\s*((?:\d+(?:\.\d+)?)|(?:\.\d+))/);
+    if (!m) return null;
+    const value = parseFloat(m[1]);
+    return Number.isFinite(value) ? value : null;
+  };
+  const extraCandidates = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].toLowerCase();
+    if (line.includes("plan usage limit")) {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+        const l = lines[j].trim();
+        if (/resets?\s+/i.test(l) && result.plan_usage_reset === null) result.plan_usage_reset = l;
+        const m = l.match(/^(\d+)%\s*used/i);
+        if (m && result.plan_usage_pct === null) result.plan_usage_pct = parseInt(m[1], 10);
+      }
+    }
+    if (line === "weekly limits" || line === "weekly limit") {
+      for (let j = i + 1; j < Math.min(i + 6, lines.length); j++) {
+        const l = lines[j].trim();
+        if (/resets?\s+/i.test(l) && result.weekly_reset === null) result.weekly_reset = l;
+        const m = l.match(/^(\d+)%\s*used/i);
+        if (m && result.weekly_pct === null) result.weekly_pct = parseInt(m[1], 10);
+      }
+    }
+    if (line.startsWith("extra usage")) {
+      for (let j = i + 1; j < Math.min(i + 12, lines.length); j++) {
+        const l = lines[j].trim();
+        if (/resets?\s+/i.test(l) && result.extra_usage_reset === null) result.extra_usage_reset = l;
+        const m = l.match(/^(\d+)%\s*used/i);
+        if (m && result.extra_usage_pct === null) result.extra_usage_pct = parseInt(m[1], 10);
+        const maybeBal = parseDollar(l);
+        if (maybeBal !== null) extraCandidates.push(maybeBal);
+      }
+      const near = [lines[i - 1], lines[i], lines[i + 1], lines[i + 2], lines[i + 3]];
+      for (const n of near) {
+        const maybeBal = parseDollar(n || "");
+        if (maybeBal !== null) extraCandidates.push(maybeBal);
+      }
+    }
+    if (line.includes("extra usage balance") || line.includes("extra usage remaining")) {
+      let bal = parseDollar(lines[i]);
+      if (bal === null && i + 1 < lines.length) bal = parseDollar(lines[i + 1]);
+      if (bal === null && i + 2 < lines.length) bal = parseDollar(lines[i + 2]);
+      if (bal === null && i > 0) bal = parseDollar(lines[i - 1]);
+      if (bal !== null && result.extra_usage_balance === null) result.extra_usage_balance = bal;
+    }
+    const slash = line.match(/\$\s*([\d.]+)\s*\/\s*\$\s*([\d.]+)/);
+    if (slash) {
+      result.spend_used = parseFloat(slash[1]);
+      result.spend_limit = parseFloat(slash[2]);
+    }
+    const spent = line.match(/\$\s*([\d.]+)\s*spent/i);
+    if (spent && result.spend_used === null) {
+      result.spend_used = parseFloat(spent[1]);
+    }
+    if (line.includes("monthly spend limit") && i > 0) {
+      const prev = lines[i - 1].trim();
+      const lim = prev.match(/^\$\s*([\d.]+)$/);
+      if (lim && result.spend_limit === null) result.spend_limit = parseFloat(lim[1]);
+    }
+  }
+  if (result.extra_usage_balance === null && extraCandidates.length) {
+    let candidates = extraCandidates.filter(v => Number.isFinite(v) && v >= 0);
+    if (result.spend_used !== null) candidates = candidates.filter(v => Math.abs(v - result.spend_used) > 0.001);
+    if (result.spend_limit !== null) candidates = candidates.filter(v => Math.abs(v - result.spend_limit) > 0.001);
+    if (candidates.length) result.extra_usage_balance = Math.min(...candidates);
+  }
+  return JSON.stringify(result);
+})()
+"""
 
-                # Read page as-is — do NOT reload, which can cause login redirects
-                # and conflicts with other CDP connections.
+            with ws_connect(ws_url, open_timeout=10, close_timeout=1) as ws:
+                ws.send(json.dumps({
+                    "id": 1,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": script, "returnByValue": True},
+                }))
+                value = None
+                for _ in range(80):
+                    msg = json.loads(ws.recv())
+                    if msg.get("id") != 1:
+                        continue
+                    if msg.get("error"):
+                        return {"error": str(msg["error"])}
+                    value = (((msg.get("result") or {}).get("result") or {}).get("value"))
+                    break
 
-                result = page.evaluate(r'''() => {
-                    const body = document.body.innerText || "";
-                    const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
-                    const result = {
-                        plan_usage_pct: null,
-                        plan_usage_reset: null,
-                        weekly_pct: null,
-                        weekly_reset: null,
-                        extra_usage_pct: null,
-                        extra_usage_reset: null,
-                        spend_used: null,
-                        spend_limit: null,
-                    };
-                    for (let i = 0; i < lines.length; i++) {
-                        const line = lines[i].toLowerCase();
-                        if (line.includes("plan usage limit")) {
-                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-                                const l = lines[j].trim();
-                                if (/resets?\s+/i.test(l) && result.plan_usage_reset === null) result.plan_usage_reset = l;
-                                const m = l.match(/^(\d+)%\s*used/i);
-                                if (m && result.plan_usage_pct === null) result.plan_usage_pct = parseInt(m[1], 10);
-                            }
-                        }
-                        if (line === "weekly limits" || line === "weekly limit") {
-                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-                                const l = lines[j].trim();
-                                if (/resets?\s+/i.test(l) && result.weekly_reset === null) result.weekly_reset = l;
-                                const m = l.match(/^(\d+)%\s*used/i);
-                                if (m && result.weekly_pct === null) result.weekly_pct = parseInt(m[1], 10);
-                            }
-                        }
-                        if (line.startsWith("extra usage")) {
-                            for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
-                                const l = lines[j].trim();
-                                if (/resets?\s+/i.test(l) && result.extra_usage_reset === null) result.extra_usage_reset = l;
-                                const m = l.match(/^(\d+)%\s*used/i);
-                                if (m && result.extra_usage_pct === null) result.extra_usage_pct = parseInt(m[1], 10);
-                            }
-                        }
-                        // "$X / $Y" format (old layout)
-                        const spendMatch = line.match(/\$\s*([\d.]+)\s*\/\s*\$\s*([\d.]+)/);
-                        if (spendMatch) {
-                            result.spend_used = parseFloat(spendMatch[1]);
-                            result.spend_limit = parseFloat(spendMatch[2]);
-                        }
-                        // "$X spent" format (current layout)
-                        const spentMatch = line.match(/\$\s*([\d.]+)\s*spent/i);
-                        if (spentMatch && result.spend_used === null) {
-                            result.spend_used = parseFloat(spentMatch[1]);
-                        }
-                        // "Monthly spend limit" preceded by "$X" on prev line
-                        if (line.includes("monthly spend limit") && i > 0) {
-                            const prevLine = lines[i - 1].trim();
-                            const limMatch = prevLine.match(/^\$\s*([\d.]+)$/);
-                            if (limMatch && result.spend_limit === null) {
-                                result.spend_limit = parseFloat(limMatch[1]);
-                            }
-                        }
-                    }
-                    return result;
-                }''')
-
-                browser.close()
-                return result
+            if not value:
+                return {}
+            return json.loads(value) if isinstance(value, str) else {}
         except Exception as e:
             logger.warning("CDP sync scrape (Claude) failed: %s", e)
             return {}
@@ -529,6 +715,15 @@ class BalancePoller:
         return await page.evaluate(r'''() => {
             const body = document.body.innerText || "";
             const lines = body.split("\n").map(l => l.trim()).filter(Boolean);
+            const parseAmount = (text) => {
+                if (!text) return null;
+                const normalized = String(text).replace(/[−–]/g, "-").replace(/,/g, "");
+                const m = normalized.match(/([+-]?)\s*\$?\s*((?:\d+(?:\.\d+)?)|(?:\.\d+))/);
+                if (!m) return null;
+                const sign = m[1] === "-" ? -1 : 1;
+                const value = parseFloat(m[2]);
+                return Number.isFinite(value) ? sign * value : null;
+            };
             const result = {
                 plan_usage_pct: null,
                 plan_usage_reset: null,
@@ -536,6 +731,7 @@ class BalancePoller:
                 weekly_reset: null,
                 extra_usage_pct: null,
                 extra_usage_reset: null,
+                extra_usage_balance: null,
                 spend_used: null,
                 spend_limit: null,
             };
@@ -586,6 +782,15 @@ class BalancePoller:
                         if (pctMatch && result.extra_usage_pct === null) {
                             result.extra_usage_pct = parseInt(pctMatch[1], 10);
                         }
+                    }
+                }
+                if (line.includes("extra usage balance")) {
+                    let bal = parseAmount(lines[i]);
+                    if (bal === null && i + 1 < lines.length) bal = parseAmount(lines[i + 1]);
+                    if (bal === null && i + 2 < lines.length) bal = parseAmount(lines[i + 2]);
+                    if (bal === null && i > 0) bal = parseAmount(lines[i - 1]);
+                    if (bal !== null && result.extra_usage_balance === null) {
+                        result.extra_usage_balance = bal;
                     }
                 }
 
@@ -670,14 +875,46 @@ class BalancePoller:
 
     async def _poll_claude_usage_page(self) -> Dict[str, Any]:
         """
-        Scrape Claude usage page for spend, extra usage, and usage window percentages.
-        Uses sync Playwright in a thread to avoid event loop conflicts with uvicorn.
-        Falls back to headless browser if CDP is unavailable.
+        Fetch Claude usage windows + spend data.
+
+        Source mode:
+        - rainmeter_port: OAuth usage API only
+        - cdp: browser CDP scrape only
+        - auto: prefer OAuth usage API, then CDP fallback
         """
+        mode = self._usage_source_mode()
+        if mode in {"auto", "rainmeter_port"}:
+            try:
+                from balance.providers.claude_oauth_usage import fetch_usage_payload
+
+                payload = await fetch_usage_payload(self.config)
+                if payload and not payload.get("error"):
+                    return {
+                        "logged_in": True,
+                        "spend_used": payload.get("spend_used"),
+                        "spend_limit": payload.get("spend_limit"),
+                        "spend_reset_text": payload.get("spend_reset_text"),
+                        "extra_usage_balance": payload.get("extra_usage_balance"),
+                        "plan_usage_pct": payload.get("plan_usage_pct"),
+                        "plan_usage_reset": payload.get("plan_usage_reset"),
+                        "weekly_pct": payload.get("weekly_pct"),
+                        "weekly_reset": payload.get("weekly_reset"),
+                        "extra_usage_pct": payload.get("extra_usage_pct"),
+                        "source": payload.get("source", "oauth_usage_api"),
+                    }
+                if mode == "rainmeter_port":
+                    logger.info(
+                        "Claude OAuth usage unavailable: %s",
+                        (payload or {}).get("error"),
+                    )
+            except Exception as e:
+                if mode == "rainmeter_port":
+                    logger.warning("Claude OAuth usage fetch failed: %s", e)
+
         use_cdp = bool(self.config.get("use_brave_cdp", False))
 
         # --- CDP path: run sync Playwright in a thread ---
-        if use_cdp:
+        if mode in {"auto", "cdp"} and use_cdp:
             try:
                 result = await asyncio.to_thread(self._cdp_scrape_claude_sync)
                 if result and not result.get("error"):
@@ -686,12 +923,13 @@ class BalancePoller:
                         "spend_used": result.get("spend_used"),
                         "spend_limit": result.get("spend_limit"),
                         "spend_reset_text": result.get("extra_usage_reset"),
-                        "extra_usage_balance": None,
+                        "extra_usage_balance": result.get("extra_usage_balance"),
                         "plan_usage_pct": result.get("plan_usage_pct"),
                         "plan_usage_reset": result.get("plan_usage_reset"),
                         "weekly_pct": result.get("weekly_pct"),
                         "weekly_reset": result.get("weekly_reset"),
                         "extra_usage_pct": result.get("extra_usage_pct"),
+                        "source": "cdp_scrape",
                     }
                 elif result.get("error"):
                     logger.info("CDP Claude scrape: %s", result["error"])
@@ -704,64 +942,83 @@ class BalancePoller:
 
     @staticmethod
     def _cdp_scrape_provider_sync(url: str, selectors: List[str]) -> Dict[str, Any]:
-        """Sync CDP scrape for generic provider pages. Runs in a thread."""
+        """Sync CDP scrape for generic provider pages via DevTools WS."""
         try:
-            from playwright.sync_api import sync_playwright
-        except Exception:
-            return {"error": "playwright not installed"}
+            req = urllib.request.Request(f"{_BRAVE_CDP_URL}/json/list")
+            if _BRAVE_CDP_HOST not in ("127.0.0.1", "localhost"):
+                req.add_header("Host", f"127.0.0.1:{_BRAVE_CDP_PORT}")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                targets = json.loads(resp.read().decode())
 
-        try:
-            with sync_playwright() as p:
-                browser = _cdp_connect(p)
+            target_host = urlparse(url).netloc.lower()
+            ws_url = None
+            final_url = url
+            for target in targets:
+                t_url = str(target.get("url", ""))
+                if target_host and target_host in t_url.lower():
+                    ws_url = target.get("webSocketDebuggerUrl")
+                    final_url = t_url
+                    break
 
-                # Find existing tab by URL instead of opening a new one.
-                # Match on the URL's host+path to handle query params.
-                from urllib.parse import urlparse
-                target_host = urlparse(url).netloc
-                page = None
-                for ctx in browser.contexts:
-                    for pg in ctx.pages:
-                        if target_host in (pg.url or ""):
-                            page = pg
-                            break
-                    if page:
-                        break
+            if not ws_url:
+                return {"error": f"Tab not open in Brave for {url}"}
+            if _BRAVE_CDP_HOST not in ("127.0.0.1", "localhost"):
+                ws_url = ws_url.replace("127.0.0.1", _BRAVE_CDP_HOST)
 
-                if not page:
-                    browser.close()
-                    return {"error": f"Tab not open in Brave for {url}"}
+            css_selectors = [
+                selector for selector in selectors
+                if isinstance(selector, str) and selector and not selector.startswith("text=")
+            ]
+            script = f"""
+                (() => {{
+                    const selectors = {json.dumps(css_selectors)};
+                    let selected = null;
+                    for (const sel of selectors) {{
+                        try {{
+                            const el = document.querySelector(sel);
+                            const txt = el ? (el.innerText || el.textContent || "").trim() : "";
+                            if (txt) {{ selected = txt; break; }}
+                        }} catch (e) {{}}
+                    }}
+                    const body = document.body ? (document.body.innerText || "") : "";
+                    return JSON.stringify({{
+                        selected_text: selected,
+                        page_text: body,
+                        final_url: location.href
+                    }});
+                }})()
+            """
 
-                # Read page as-is — do NOT reload.
-
-                selected_text = None
-                for selector in selectors:
-                    try:
-                        page.wait_for_selector(selector, timeout=6000)
-                        selected_text = page.locator(selector).first.text_content() or ""
-                        if selected_text:
-                            break
-                    except Exception:
+            with ws_connect(ws_url, open_timeout=10, close_timeout=1) as ws:
+                ws.send(json.dumps({
+                    "id": 1,
+                    "method": "Runtime.evaluate",
+                    "params": {"expression": script, "returnByValue": True},
+                }))
+                value = None
+                for _ in range(80):
+                    msg = json.loads(ws.recv())
+                    if msg.get("id") != 1:
                         continue
+                    if msg.get("error"):
+                        return {"error": str(msg["error"])}
+                    value = (((msg.get("result") or {}).get("result") or {}).get("value"))
+                    break
 
-                page_text = ""
-                try:
-                    if not page.is_closed():
-                        page_text = page.inner_text("body")
-                except Exception:
-                    pass
-
-                final_url = page.url if not page.is_closed() else url
-                browser.close()
-
-                return {
-                    "selected_text": selected_text,
-                    "page_text": page_text,
-                    "final_url": final_url,
-                    "body_length": len(page_text),
-                    "body_preview": page_text[:600],
-                }
+            if not value:
+                return {"error": "CDP evaluate returned no payload"}
+            payload = json.loads(value) if isinstance(value, str) else {}
+            page_text = str(payload.get("page_text") or "")
+            return {
+                "selected_text": payload.get("selected_text"),
+                "page_text": page_text,
+                "final_url": payload.get("final_url") or final_url,
+                "body_length": len(page_text),
+                "body_preview": page_text[:600],
+            }
         except Exception as e:
             return {"error": str(e)}
+
 
     async def _poll_provider_page(
         self,
@@ -769,10 +1026,6 @@ class BalancePoller:
         url: str,
         selectors: List[str],
     ) -> Dict[str, Any]:
-        try:
-            from playwright.async_api import async_playwright  # pylint: disable=import-outside-toplevel
-        except Exception:
-            return self._error_snapshot(provider, "playwright not installed")
 
         raw_response: Dict[str, Any] = {"url": url, "selected_text": None}
         page_text = ""
@@ -1035,17 +1288,19 @@ class BalancePoller:
     def _computed_provider_cost(self, provider: str) -> float:
         aliases = _PROVIDER_ALIASES.get(provider, [provider])
         placeholders = ",".join("?" * len(aliases))
-        with sqlite3.connect(self.db_path) as conn:
+        def _op(conn):
             cursor = conn.cursor()
             cursor.execute(
                 f"SELECT COALESCE(SUM(cost_total), 0) FROM records WHERE provider IN ({placeholders})",
                 aliases,
             )
             value = cursor.fetchone()[0] or 0.0
-        return float(value)
+            return float(value)
+
+        return self._with_db(_op, default=0.0)
 
     def _insert_snapshot(self, snapshot: Dict[str, Any]):
-        with sqlite3.connect(self.db_path) as conn:
+        def _op(conn):
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -1081,6 +1336,9 @@ class BalancePoller:
                 ),
             )
             conn.commit()
+            return None
+
+        self._with_db(_op)
 
     def get_latest_snapshots(self, providers: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
         where = ""
@@ -1101,8 +1359,8 @@ class BalancePoller:
             ) latest
             ON rs.provider = latest.provider AND rs.timestamp = latest.max_ts
         """
-        latest: Dict[str, Dict[str, Any]] = {}
-        with sqlite3.connect(self.db_path) as conn:
+        def _op(conn):
+            latest: Dict[str, Dict[str, Any]] = {}
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute(query, params)
@@ -1142,7 +1400,9 @@ class BalancePoller:
                     "error": parsed_raw.get("error"),
                     "raw_payload": parsed_raw.get("payload") if isinstance(parsed_raw, dict) else {},
                 }
-        return latest
+            return latest
+
+        return self._with_db(_op, default={})
 
     @staticmethod
     def _parse_balance_text(text: str) -> Dict[str, Optional[float]]:

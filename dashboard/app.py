@@ -131,7 +131,13 @@ def create_app() -> FastAPI:
     telemetry.init(telemetry_repo, config, balance_service=balance_service)
     balance.init(balance_service, balance_repo, config, str(CONFIG_PATH))
     projection.init(projection_service, telemetry_repo, config)
-    system.init(config, db)
+    system.init(
+        config,
+        db,
+        ingestion_service=ingestion_service,
+        balance_service=balance_service,
+        balance_poller=balance_poller,
+    )
     resources.init(config, balance_poller, db)
     ratelimits.init(config, str(CONFIG_PATH), db)
     spendlimits.init(config, str(CONFIG_PATH), db)

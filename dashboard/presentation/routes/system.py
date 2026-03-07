@@ -11,13 +11,26 @@ router = APIRouter(tags=["system"])
 _config = None
 _db = None
 _evaluator = None
+_ingestion_service = None
+_balance_service = None
+_balance_poller = None
 
 
-def init(config, db, evaluator=None):
-    global _config, _db, _evaluator
+def init(
+    config,
+    db,
+    evaluator=None,
+    ingestion_service=None,
+    balance_service=None,
+    balance_poller=None,
+):
+    global _config, _db, _evaluator, _ingestion_service, _balance_service, _balance_poller
     _config = config
     _db = db
     _evaluator = evaluator
+    _ingestion_service = ingestion_service
+    _balance_service = balance_service
+    _balance_poller = balance_poller
 
 
 @router.get("/config")
@@ -61,3 +74,46 @@ async def evals():
     # The evaluator needs the old reader interface; bridge it
     # For now, return empty until evaluator is refactored
     return {"evals": []}
+
+
+@router.post("/refresh")
+async def refresh():
+    """
+    Force a full refresh cycle:
+    1) ingest new telemetry
+    2) poll resource snapshots
+    3) recompute all balances
+    """
+    out = {
+        "status": "ok",
+        "ingestion": None,
+        "resource_poll": None,
+        "balance_refresh": None,
+    }
+
+    try:
+        if _ingestion_service is not None:
+            ingestion_result = _ingestion_service.scan_all()
+            out["ingestion"] = asdict(ingestion_result)
+
+        if _balance_poller is not None:
+            polled = await _balance_poller.poll_all(
+                ["anthropic", "elevenlabs", "codex_cli", "moonshot", "minimax"]
+            )
+            out["resource_poll"] = {
+                "polled": len(polled),
+                "providers": [p.get("provider") for p in polled if isinstance(p, dict)],
+            }
+
+        if _balance_service is not None:
+            balances = await _balance_service.check_all_balances()
+            out["balance_refresh"] = {
+                "providers": len(balances),
+                "names": sorted(list(balances.keys())),
+            }
+
+        return out
+    except Exception as e:
+        out["status"] = "error"
+        out["error"] = str(e)
+        return out

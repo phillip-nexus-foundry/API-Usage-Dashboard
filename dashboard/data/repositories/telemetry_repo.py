@@ -344,6 +344,19 @@ class SQLAlchemyTelemetryRepo:
             ).scalar()
             return float(result or 0.0)
 
+    def get_cost_since_by_models(self, models: list[str], since_ms: int) -> float:
+        """Sum cost_total for a set of models since a given epoch-ms timestamp."""
+        if not models:
+            return 0.0
+        with self._db.session() as session:
+            result = session.query(
+                func.sum(Record.cost_total)
+            ).filter(
+                Record.model.in_(models),
+                Record.timestamp >= since_ms,
+            ).scalar()
+            return float(result or 0.0)
+
     def _to_dict(self, record: Record) -> dict:
         """Convert Record ORM object to dict."""
         return {

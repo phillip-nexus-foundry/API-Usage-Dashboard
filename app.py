@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - optional dependency fallback
     AsyncIOScheduler = None
 
 from parsers.openclaw_reader import OpenClawReader
+from parsers.session_paths import resolve_sessions_dir
 from balance.checker import BalanceChecker
 from balance.poller import BalancePoller
 from evals.evaluator import Evaluator
@@ -157,9 +158,11 @@ with open(config_path) as f:
     CONFIG = yaml.safe_load(f)
 
 # Initialize components
+# Resolve sessions directory (handles WSL path conversion)
+SESSIONS_DIR = resolve_sessions_dir(CONFIG.get("sessions_dir"))
 reader = OpenClawReader(
     db_path="dashboard.db",
-    sessions_dir=CONFIG["sessions_dir"]
+    sessions_dir=SESSIONS_DIR
 )
 balance_checker = BalanceChecker(CONFIG, config_path=str(config_path))
 evaluator = Evaluator(CONFIG)
@@ -173,6 +176,7 @@ balance_poller = BalancePoller(
     auto_correct=False,
 )
 scheduler = None
+DB_WRITE_LOCK: Optional[asyncio.Lock] = None
 PACIFIC_TZ = ZoneInfo("America/Los_Angeles")
 
 def _utc_now() -> datetime:
@@ -217,7 +221,11 @@ async def _run_resource_poll() -> List[Dict[str, Any]]:
 
 async def _resource_poll_job():
     try:
-        await _run_resource_poll()
+        if DB_WRITE_LOCK is None:
+            await _run_resource_poll()
+        else:
+            async with DB_WRITE_LOCK:
+                await _run_resource_poll()
         logger.info("Resource polling job completed")
     except Exception as e:
         logger.error(f"Resource polling job failed: {e}")
@@ -229,11 +237,21 @@ async def lifespan(_app: FastAPI):
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler
 
+    global DB_WRITE_LOCK
+    if DB_WRITE_LOCK is None:
+        DB_WRITE_LOCK = asyncio.Lock()
+    db_write_lock = DB_WRITE_LOCK
+    event_loop = asyncio.get_running_loop()
+
     logger.info("Starting background session scan...")
+
+    async def _scan_sessions_with_lock():
+        async with db_write_lock:
+            await asyncio.to_thread(reader.scan)
 
     async def _initial_scan():
         try:
-            await asyncio.to_thread(reader.scan)
+            await _scan_sessions_with_lock()
             if reader.parse_errors:
                 logger.warning(f"Encountered {len(reader.parse_errors)} parse errors during scan")
             logger.info("Initial background scan complete")
@@ -267,7 +285,8 @@ async def lifespan(_app: FastAPI):
             import time
             self._last_scan_time = time.time()
             logger.info("File change detected, rescanning...")
-            reader.scan()
+            future = asyncio.run_coroutine_threadsafe(_scan_sessions_with_lock(), event_loop)
+            future.add_done_callback(lambda fut: logger.error(f"File watcher scan failed: {fut.exception()}") if fut.exception() else None)
 
         def on_modified(self, event):
             if event.src_path.endswith(".jsonl"):
@@ -278,10 +297,10 @@ async def lifespan(_app: FastAPI):
                 self._debounced_scan()
 
     observer = Observer()
-    observer.schedule(SessionFileHandler(), CONFIG["sessions_dir"], recursive=False)
+    observer.schedule(SessionFileHandler(), SESSIONS_DIR, recursive=False)
     observer.daemon = True
     observer.start()
-    logger.info(f"Watching {CONFIG['sessions_dir']} for changes")
+    logger.info(f"Watching {SESSIONS_DIR} for changes")
 
     # Auto-detect rate limits from provider APIs
     logger.info("Probing APIs for rate limits...")

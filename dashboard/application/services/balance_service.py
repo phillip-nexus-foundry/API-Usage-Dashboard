@@ -195,41 +195,14 @@ class BalanceService:
 
         total_deposits = sum(e.get("amount", 0) for e in ledger)
 
-        # Check for verified override (use as baseline + incremental DB cost since calibration)
-        if cfg.get("verified_usage_cost") is not None:
-            try:
-                baseline_cost = float(cfg["verified_usage_cost"])
-                incremental = 0.0
-                cal_date = cfg.get("verified_usage_date")
-                if cal_date:
-                    from datetime import datetime as dt, timedelta
-                    # Interpret calibration date in system local timezone (not UTC),
-                    # since the user calibrated in their local time. Use start of
-                    # NEXT local day to avoid double-counting calibration day usage.
-                    local_tz = dt.now().astimezone().tzinfo
-                    cal_dt = dt.strptime(str(cal_date), "%Y-%m-%d").replace(tzinfo=local_tz) + timedelta(days=1)
-                    cal_ms = int(cal_dt.timestamp() * 1000)
-                    incremental = self._telemetry_repo.get_cost_since(provider_name, cal_ms)
-                usage_cost = round(baseline_cost + incremental, 6)
-                return {
-                    "remaining": round(total_deposits - usage_cost, 2),
-                    "total_deposits": total_deposits,
-                    "cumulative_cost": usage_cost,
-                    "source": "ledger",
-                    "cost_source": "verified_override",
-                    "confidence": 0.85,
-                }
-            except (TypeError, ValueError):
-                pass
-
-        # Compute from DB
-        db_cost = self._telemetry_repo.get_total_cost_by_provider(provider_name)
+        # Compute usage cost with verified baseline when configured.
+        db_cost, cost_source = self._compute_usage_cost(provider_name, cfg)
         return {
             "remaining": round(total_deposits - db_cost, 2),
             "total_deposits": total_deposits,
             "cumulative_cost": db_cost,
             "source": "computed",
-            "cost_source": "computed",
+            "cost_source": cost_source,
             "confidence": 0.7,
         }
 
@@ -251,9 +224,9 @@ class BalanceService:
             ledger = proj_cfg.get("ledger", [])
             proj_deposits = sum(e.get("amount", 0) for e in ledger)
             proj_models = proj_cfg.get("models", [])
-
-            # Get cost for project's models
-            proj_cost = self._telemetry_repo.get_total_cost_by_models(proj_models)
+            proj_cost, proj_cost_source = self._compute_usage_cost(
+                provider_name, proj_cfg, proj_models
+            )
 
             proj_remaining = proj_deposits - proj_cost
 
@@ -272,6 +245,7 @@ class BalanceService:
                 "remaining": round(proj_remaining, 2),
                 "personal_invested": round(personal, 2),
                 "models": proj_models,
+                "cost_source": proj_cost_source,
                 "ledger": ledger,
             }
 
@@ -319,6 +293,46 @@ class BalanceService:
             "critical_threshold": crit,
             "projects": projects_result,
         }
+
+    def _compute_usage_cost(
+        self,
+        provider_name: str,
+        cfg: dict,
+        models: Optional[list[str]] = None,
+    ) -> tuple[float, str]:
+        """
+        Compute usage cost with optional verified baseline calibration.
+
+        If verified_usage_cost is present, treat it as an authoritative baseline
+        and add only incremental DB costs after the calibration day.
+        """
+        if cfg.get("verified_usage_cost") is not None:
+            try:
+                baseline_cost = float(cfg["verified_usage_cost"])
+                incremental = 0.0
+                cal_date = cfg.get("verified_usage_date")
+                if cal_date:
+                    from datetime import datetime as dt, timedelta
+                    local_tz = dt.now().astimezone().tzinfo
+                    cal_dt = dt.strptime(str(cal_date), "%Y-%m-%d").replace(
+                        tzinfo=local_tz
+                    ) + timedelta(days=1)
+                    cal_ms = int(cal_dt.timestamp() * 1000)
+                    if models:
+                        incremental = self._telemetry_repo.get_cost_since_by_models(
+                            models, cal_ms
+                        )
+                    else:
+                        incremental = self._telemetry_repo.get_cost_since(
+                            provider_name, cal_ms
+                        )
+                return round(baseline_cost + incremental, 6), "verified_override"
+            except (TypeError, ValueError):
+                pass
+
+        if models:
+            return round(self._telemetry_repo.get_total_cost_by_models(models), 6), "computed"
+        return round(self._telemetry_repo.get_total_cost_by_provider(provider_name), 6), "computed"
 
     def _format_balance_response(
         self,

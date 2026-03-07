@@ -58,15 +58,34 @@ async def balance_topup(
     amount: float = Body(...),
     note: str = Body(""),
     project: Optional[str] = Body(None),
+    topup_date: Optional[str] = Body(None),
 ):
     """Add a top-up entry to a provider's ledger."""
     balance_cfg = _config.get("balance", {})
     provider_cfg = balance_cfg.get(provider)
+    provider_key = str(provider).strip().lower()
 
     if provider_cfg is None:
         return {"error": f"Unknown provider: {provider}", "status": 400}
+    if provider_key == "moonshot":
+        return {
+            "error": "Manual Moonshot ledger edits are disabled. Moonshot must be tracked from live API balance only.",
+            "status": 400,
+        }
     if amount <= 0:
         return {"error": "Amount must be positive", "status": 400}
+
+    # Validate date format if provided
+    entry_date = None
+    if topup_date:
+        try:
+            # Validate the date format (YYYY-MM-DD)
+            datetime.strptime(topup_date, "%Y-%m-%d")
+            entry_date = topup_date
+        except ValueError:
+            return {"error": "Invalid date format. Use YYYY-MM-DD", "status": 400}
+    else:
+        entry_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     # Find target ledger
     if provider_cfg.get("projects"):
@@ -84,7 +103,7 @@ async def balance_topup(
         return {"error": f"No ledger configured for '{provider}'", "status": 400}
 
     entry = {
-        "date": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "date": entry_date,
         "amount": round(amount, 2),
     }
     if note:
@@ -113,9 +132,15 @@ async def balance_topup_delete(
     """Remove a ledger entry by index."""
     balance_cfg = _config.get("balance", {})
     provider_cfg = balance_cfg.get(provider)
+    provider_key = str(provider).strip().lower()
 
     if provider_cfg is None:
         return {"error": f"Unknown provider: {provider}", "status": 400}
+    if provider_key == "moonshot":
+        return {
+            "error": "Manual Moonshot ledger edits are disabled. Moonshot must be tracked from live API balance only.",
+            "status": 400,
+        }
 
     if provider_cfg.get("projects"):
         if not project:

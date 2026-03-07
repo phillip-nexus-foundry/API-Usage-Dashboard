@@ -86,6 +86,7 @@ def _pct(used, limit):
 @router.get("/resources")
 async def resources():
     """Resource availability cards with usage windows."""
+    usage_allow_fallback = bool((_config or {}).get("usage_allow_fallback", False))
     provider_defs = {
         "anthropic": {
             "display_name": _get_claude_code_tier_display(),
@@ -172,13 +173,13 @@ async def resources():
             spend_limit_val = usage_payload.get("spend_limit") if isinstance(usage_payload, dict) else None
             spend_reset_text = usage_payload.get("spend_reset_text") if isinstance(usage_payload, dict) else None
             extra_balance = usage_payload.get("extra_usage_balance") if isinstance(usage_payload, dict) else None
-            if spend_used is None:
+            if usage_allow_fallback and spend_used is None:
                 spend_used = fallback.get("spend_used")
-            if spend_limit_val is None:
+            if usage_allow_fallback and spend_limit_val is None:
                 spend_limit_val = fallback.get("spend_limit", extra_limit)
-            if spend_reset_text is None:
+            if usage_allow_fallback and spend_reset_text is None:
                 spend_reset_text = fallback.get("spend_reset_text")
-            if extra_balance is None:
+            if usage_allow_fallback and extra_balance is None:
                 extra_balance = fallback.get("extra_usage_balance")
             if isinstance(extra_balance, (int, float)):
                 extra_value = round(float(extra_balance), 2)
@@ -280,7 +281,11 @@ async def resources_poll():
     """Trigger immediate resource polling."""
     if _balance_poller:
         results = await _balance_poller.poll_all(
-            ["anthropic", "minimax", "elevenlabs", "codex_cli"]
+            ["anthropic", "minimax", "elevenlabs", "codex_cli", "moonshot"]
         )
-        return {"status": "ok", "polled": len(results)}
+        return {
+            "status": "ok",
+            "polled": len(results),
+            "providers": [r.get("provider") for r in results if isinstance(r, dict)],
+        }
     return {"status": "ok", "polled": 0, "note": "Poller not configured"}
