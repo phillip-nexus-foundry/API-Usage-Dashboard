@@ -5,7 +5,7 @@ Real-time token usage and cost tracking for all LLMs used via OpenClaw.
 ## Quick Start
 
 ```batch
-cd C:\Users\AI-Agents\.openclaw\projects\API-Useage-Dashboard
+cd /home/agents/openclaw-local/core/projects/API-Useage-Dashboard
 run-persistent.bat
 ```
 
@@ -15,8 +15,8 @@ Dashboard runs at **http://127.0.0.1:8050**
 
 | Method | Command | Use When |
 |--------|---------|----------|
-| **Persistent (recommended)** | `run-persistent.bat` | Normal use — auto-restarts on crash |
-| **One-shot** | `python app.py` | Debugging — exits on crash |
+| **Persistent (recommended)** | `run-persistent.bat` | Normal use â€” auto-restarts on crash |
+| **One-shot** | `python app.py` | Debugging â€” exits on crash |
 | **Via uvicorn** | `python -m uvicorn app:app --host 127.0.0.1 --port 8050` | Development |
 
 ### First-time setup
@@ -26,8 +26,8 @@ pip install -r requirements.txt
 
 ## Architecture
 
-- **Parser:** Reads OpenClaw JSONL session files from `C:/Users/AI-Agents/.openclaw/agents/main/sessions/`
-- **Database:** SQLite (`dashboard.db`) — auto-created, incremental updates via mtime tracking
+- **Parser:** Reads OpenClaw JSONL session files from `/home/agents/openclaw-local/core/agents/main/sessions/`
+- **Database:** SQLite (`dashboard.db`) â€” auto-created, incremental updates via mtime tracking
 - **Server:** FastAPI + static files (Chart.js dark-theme dashboard)
 - **File watcher:** Auto-rescans when session files change (debounced 1s)
 - **Balance checker:** Probes Anthropic/Moonshot APIs for rate limits on startup
@@ -135,7 +135,7 @@ pip install -r requirements.txt
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Main server — all API endpoints |
+| `app.py` | Main server â€” all API endpoints |
 | `config.yaml` | Pricing, rate limits, server config |
 | `parsers/openclaw_reader.py` | JSONL parser + SQLite writer |
 | `parsers/telemetry_schema.py` | TelemetryRecord dataclass + cost math |
@@ -149,4 +149,4 @@ pip install -r requirements.txt
 
 - Port `8050` is the default (configurable in `config.yaml`)
 - The persistent runner restarts after 5 seconds on crash
-- Historical crash cause: MemoryError on large queries — now handled gracefully with gc.collect() fallback
+- Historical crash cause: MemoryError on large queries â€” now handled gracefully with gc.collect() fallback

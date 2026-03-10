@@ -2,9 +2,9 @@
 
 ## Context
 
-You need full granular visibility into token usage and API costs across all LLMs used via OpenClaw (Anthropic Claude models + Moonshot Kimi K2.5). OpenClaw already captures rich per-call telemetry in JSONL session files at `C:/Users/AI-Agents/.openclaw/agents/main/sessions/` (~656 files, ~2871 API calls). Rather than adding a heavyweight OTel+Grafana+Docker stack on top, we build a **lightweight Python FastAPI app** that reads this existing data directly and serves a Grafana-inspired dark-theme dashboard in the browser. This gives you a working MVP immediately with zero infrastructure overhead.
+You need full granular visibility into token usage and API costs across all LLMs used via OpenClaw (Anthropic Claude models + Moonshot Kimi K2.5). OpenClaw already captures rich per-call telemetry in JSONL session files at `/home/agents/openclaw-local/core/agents/main/sessions/` (~656 files, ~2871 API calls). Rather than adding a heavyweight OTel+Grafana+Docker stack on top, we build a **lightweight Python FastAPI app** that reads this existing data directly and serves a Grafana-inspired dark-theme dashboard in the browser. This gives you a working MVP immediately with zero infrastructure overhead.
 
-**Target:** `C:\Users\AI-Agents\.openclaw\projects\API-Useage-Dashboard`
+**Target:** `/home/agents/openclaw-local/core/projects/API-Useage-Dashboard`
 
 ---
 
@@ -45,12 +45,12 @@ Runs on `http://127.0.0.1:8050` - single `python` process, no Docker required.
 - `compute_dollar_cost()` function that independently calculates cost from token counts
 
 **3. `parsers/openclaw_reader.py`** - JSONL session file parser
-- `OpenClawReader` class that scans `C:/Users/AI-Agents/.openclaw/agents/main/sessions/`
+- `OpenClawReader` class that scans `/home/agents/openclaw-local/core/agents/main/sessions/`
 - Parses each `.jsonl` and `.jsonl.reset.*` file line-by-line
 - Extracts assistant messages with `usage` data into `TelemetryRecord` objects
 - Stores parsed records in SQLite (`dashboard.db`) with two tables:
-  - `records` — all 24 TelemetryRecord fields, indexed on `session_id`, `timestamp`, `provider`, `model`
-  - `file_index` — tracks `(filepath, mtime, record_count)` for incremental updates
+  - `records` â€” all 24 TelemetryRecord fields, indexed on `session_id`, `timestamp`, `provider`, `model`
+  - `file_index` â€” tracks `(filepath, mtime, record_count)` for incremental updates
 - On `scan()`: checks `file_index` mtimes, only re-parses changed/new files, upserts into `records`. Deleted files have their records removed from both tables.
 - Provides `scan()`, `get_records(filters)`, `get_session_ids()`, `get_stats()` methods (backed by SQL queries)
 - Session JSONL structure: line 0 is `type=session` header, subsequent lines are `type=message` with nested `message.usage` on assistant role entries
@@ -216,7 +216,7 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
 - Each JSONL line is parsed inside a `try/except`. Malformed lines are logged (with file path + line number) to a `List[ParseError]` on the reader and to `stderr`, then skipped.
 - If an entire file fails to open (permissions, encoding), log the file-level error, skip that file, continue scanning.
 - The `/api/summary` response includes a `parse_errors: int` count so the dashboard can surface a small warning badge if errors > 0.
-- **Never stop the scan** — partial data is far more useful than no data.
+- **Never stop the scan** â€” partial data is far more useful than no data.
 
 ### 2. Incremental Update Strategy
 
@@ -227,7 +227,7 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
   1. List all `.jsonl` and `.jsonl.reset.*` files in the sessions directory.
   2. For each file: if `mtime` matches the `file_index` entry, skip re-parsing. If `mtime` changed or file is new, re-parse, delete old records for that file, and insert new ones.
   3. For `file_index` entries whose files no longer exist on disk: **delete their records from both tables** (handles session file deletion cleanly).
-- **Scan depth:** Flat sessions directory only (no recursive subdirectories — OpenClaw stores sessions flat).
+- **Scan depth:** Flat sessions directory only (no recursive subdirectories â€” OpenClaw stores sessions flat).
 - The auto-refresh (60s timer in JS) calls `GET /api/summary` etc., which queries the DB. `POST /api/refresh` forces a full re-scan by clearing all `file_index` entries.
 
 ### 3. Anthropic Balance Calculation
@@ -250,7 +250,7 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
       critical_threshold: 5.00
   ```
 - **Calculation:** `remaining = sum(ledger[*].amount) - cumulative_cost_from_sessions`
-- Handles multiple top-ups naturally — just add another ledger entry with date and amount.
+- Handles multiple top-ups naturally â€” just add another ledger entry with date and amount.
 - If no ledger is configured, the balance endpoint returns `{"anthropic": {"status": "not_configured", "message": "Add ledger entries to config.yaml"}}`.
 
 ### 4. Moonshot API Auth
@@ -266,7 +266,7 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
       critical_threshold: 2.00
   ```
 - `BalanceChecker` reads `os.environ.get(env_var_name)` at call time.
-- **Failure modes — all return structured JSON, never crash:**
+- **Failure modes â€” all return structured JSON, never crash:**
   - Env var not set: `{"moonshot": {"status": "not_configured", "message": "Set MOONSHOT_API_KEY env var"}}`
   - HTTP 401/403 (bad/expired token): `{"moonshot": {"status": "auth_error", "message": "Token invalid or expired"}}`
   - Network timeout (5s): `{"moonshot": {"status": "unreachable", "message": "API timeout"}}`
@@ -277,8 +277,8 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
 **Decision: SQLite from the start.**
 
 - `dashboard.db` (SQLite) with two tables:
-  - `records` — all 24 `TelemetryRecord` fields, indexed on `session_id`, `timestamp`, `provider`, `model`
-  - `file_index` — tracks `(filepath, mtime, record_count)` for incremental updates
+  - `records` â€” all 24 `TelemetryRecord` fields, indexed on `session_id`, `timestamp`, `provider`, `model`
+  - `file_index` â€” tracks `(filepath, mtime, record_count)` for incremental updates
 - `OpenClawReader.scan()` checks `file_index` mtimes, only re-parses changed/new files, upserts into `records`. Deleted source files have their records removed.
 - All `/api/*` endpoints query SQLite directly using `aiosqlite` for async access from FastAPI.
 - **Benefits:** Survives restarts without re-scan, enables efficient SQL aggregations for summary/timeseries endpoints, scales cleanly as session count grows.
@@ -291,7 +291,7 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
 - OpenClaw timestamps are Unix epoch milliseconds (e.g., `1771138478699`). These are inherently UTC.
 - `dashboard.js` converts to the browser's local timezone using `new Date(ts).toLocaleString()` by default.
 - A small toggle in the dashboard header switches between "Local" and "UTC" display. Toggle state is persisted in `localStorage`.
-- API responses always return raw epoch milliseconds — the JS layer handles all formatting. This keeps the API timezone-agnostic.
+- API responses always return raw epoch milliseconds â€” the JS layer handles all formatting. This keeps the API timezone-agnostic.
 
 ### 7. Chart.js Responsive Behavior
 
@@ -300,10 +300,11 @@ Each returns `EvalResult(eval_name, score 0-1, grade A-F, details, count, timest
 - **Breakpoints:**
   - `>1200px`: Full 12-column grid as designed (2-3 charts per row)
   - `768px-1200px`: 2 charts per row
-  - `<768px`: Single column, all charts stacked vertically (no charts hidden — all data stays accessible)
+  - `<768px`: Single column, all charts stacked vertically (no charts hidden â€” all data stays accessible)
 - **Chart sizing:** Each chart canvas uses `maintainAspectRatio: false` with CSS `min-height: 250px` to stay readable on narrow screens.
 - **Table on mobile:**
   - Horizontal scroll with `-webkit-overflow-scrolling: touch` for momentum scrolling
   - First column (timestamp) is sticky-positioned so it remains visible while scrolling horizontally
   - Pagination controls are full-width buttons (easy to tap)
 - **KPI cards:** Wrap to 2-per-row on tablet, 1-per-row on phone using `flex-wrap`.
+
