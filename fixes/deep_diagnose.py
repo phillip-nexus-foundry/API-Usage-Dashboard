@@ -2,7 +2,7 @@
 import json, glob, os
 from collections import Counter
 
-os.chdir(r"C:\Users\AI-Agents\.openclaw\agents\main\sessions")
+os.chdir("/home/agents/openclaw-local/core/agents/main/sessions")
 
 opus_by_id = {}
 for pattern in ['*.jsonl', '*.jsonl.reset.*']:

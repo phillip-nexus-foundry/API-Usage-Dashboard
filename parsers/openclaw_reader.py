@@ -50,7 +50,7 @@ class OpenClawReader:
             sessions_dir: Sessions directory (default: OpenClaw standard location)
         """
         self.db_path = db_path
-        self.sessions_dir = sessions_dir or "C:/Users/AI-Agents/.openclaw/agents/main/sessions"
+        self.sessions_dir = sessions_dir or "/home/agents/openclaw-local/core/agents/main/sessions"
         self.parse_errors: List[ParseError] = []
         self._init_db()
     

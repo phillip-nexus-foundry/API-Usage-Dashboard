@@ -2,7 +2,7 @@ server:
   host: 127.0.0.1
   port: 8050
 database_url: postgresql://dashboard:dashboard_local@localhost:5432/api_usage_dashboard
-sessions_dir: C:/Users/AI-Agents/.openclaw/agents/main/sessions
+sessions_dir: /home/agents/openclaw-local/core/agents/main/sessions
 claude_code_tier: pro
 claude_extra_usage_limit: 25.0
 claude_usage_fallback:
@@ -23,8 +23,8 @@ codex_usage_fallback:
 elevenlabs_api_key: sk_10f001fedce804c6587064bc4b8369ae47e1b25ea986aa05
 usage_source_mode: auto
 usage_allow_fallback: false
-claude_oauth_credentials_path: C:/Users/AI-Agents/.claude/.credentials.json
-codex_sessions_path: C:/Users/AI-Agents/.codex/sessions
+claude_oauth_credentials_path: C:/Users/Agents/.claude/.credentials.json
+codex_sessions_path: C:/Users/Agents/.codex/sessions
 usage_poll_timeout_seconds: 30
 scrape_error_stale_after_seconds: 900
 use_brave_cdp: true

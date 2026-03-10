@@ -1,0 +1,21 @@
+INFO:     Started server process [8236]
+INFO:     Waiting for application startup.
+INFO:__main__:Starting background session scan...
+INFO:__main__:Watching C:/Users/AI-Agents/.openclaw/agents/main/sessions for changes
+INFO:__main__:Probing APIs for rate limits...
+WARNING:__main__:Failed to probe rate limits for claude-opus: All connection attempts failed
+INFO:__main__:Initial background scan complete
+WARNING:__main__:Failed to probe rate limits for claude-sonnet: All connection attempts failed
+WARNING:__main__:Failed to probe rate limits for claude-haiku: All connection attempts failed
+INFO:apscheduler.scheduler:Adding job tentatively -- it will be properly scheduled when the scheduler starts
+INFO:apscheduler.scheduler:Added job "_resource_poll_job" to job store "default"
+INFO:apscheduler.scheduler:Scheduler started
+INFO:__main__:Startup complete
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: All connection attempts failed
+INFO:__main__:Resource polling job completed
+INFO:apscheduler.executors.default:Running job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 23:54:00 PST)" (scheduled at 2026-03-04 23:53:00-08:00)
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: All connection attempts failed
+INFO:__main__:Resource polling job completed
+INFO:apscheduler.executors.default:Job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 23:54:00 PST)" executed successfully

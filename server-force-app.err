@@ -1,0 +1,8 @@
+INFO:     Started server process [12548]
+INFO:     Waiting for application startup.
+INFO:__main__:Starting background session scan...
+INFO:__main__:Watching C:/Users/AI-Agents/.openclaw/agents/main/sessions for changes
+INFO:__main__:Probing APIs for rate limits...
+WARNING:__main__:Failed to probe rate limits for claude-opus: All connection attempts failed
+INFO:__main__:Initial background scan complete
+WARNING:__main__:Failed to probe rate limits for claude-sonnet: All connection attempts failed

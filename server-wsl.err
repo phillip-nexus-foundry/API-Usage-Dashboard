@@ -1,0 +1,200 @@
+INFO:     Started server process [25375]
+INFO:     Waiting for application startup.
+INFO:__main__:Scanning session files...
+INFO:__main__:Watching /home/aiagents/.openclaw/agents/main/sessions for changes
+INFO:__main__:Probing APIs for rate limits...
+INFO:__main__:ANTHROPIC_API_KEY not set, skipping rate limit auto-detection
+INFO:apscheduler.scheduler:Adding job tentatively -- it will be properly scheduled when the scheduler starts
+INFO:apscheduler.scheduler:Added job "_resource_poll_job" to job store "default"
+INFO:apscheduler.scheduler:Scheduler started
+INFO:__main__:Startup complete
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8050 (Press CTRL+C to quit)
+(node:25400) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25415) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+INFO:__main__:Manual refresh triggered
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:07:00 PST)" was missed by 0:00:03.321517
+(node:25448) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25471) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+INFO:__main__:Manual refresh triggered
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:08:00 PST)" was missed by 0:00:10.983942
+(node:25552) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25568) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25587) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+(node:25618) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+INFO:__main__:Resource polling job completed
+(node:25633) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:09:00 PST)" was missed by 0:00:10.459928
+(node:25659) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:10:00 PST)" was missed by 0:00:07.993056
+(node:25706) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25721) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:11:00 PST)" was missed by 0:00:04.341933
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:12:00 PST)" was missed by 0:00:04.241416
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:13:00 PST)" was missed by 0:00:02.469123
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:14:00 PST)" was missed by 0:00:06.919770
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:15:00 PST)" was missed by 0:00:05.385551
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:16:00 PST)" was missed by 0:00:02.232951
+INFO:apscheduler.executors.default:Running job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:17:00 PST)" (scheduled at 2026-03-04 21:16:00-08:00)
+(node:25930) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:25943) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+WARNING:apscheduler.scheduler:Execution of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:17:00 PST)" skipped: maximum number of running instances reached (1)
+(node:26021) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:26040) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+INFO:__main__:Resource polling job completed
+INFO:apscheduler.executors.default:Job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:18:00 PST)" executed successfully
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:19:00 PST)" was missed by 0:00:01.861564
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:20:00 PST)" was missed by 0:00:02.251613
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:21:00 PST)" was missed by 0:00:07.656773
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:22:00 PST)" was missed by 0:00:05.550075
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:23:00 PST)" was missed by 0:00:01.781999
+WARNING:apscheduler.executors.default:Run time of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:24:00 PST)" was missed by 0:00:07.415257
+INFO:apscheduler.executors.default:Running job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:25:00 PST)" (scheduled at 2026-03-04 21:24:00-08:00)
+(node:26266) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:26291) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+WARNING:apscheduler.scheduler:Execution of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:25:00 PST)" skipped: maximum number of running instances reached (1)
+INFO:__main__:Manual refresh triggered
+INFO:parsers.openclaw_reader:Deleting records for removed file: /home/aiagents/.openclaw/agents/main/sessions/c8d98208-178e-40f3-9b0d-6928e1c22845.jsonl
+INFO:parsers.openclaw_reader:Parsing /home/aiagents/.openclaw/agents/main/sessions/c8d98208-178e-40f3-9b0d-6928e1c22845.jsonl.deleted.2026-03-05T05-17-10.247Z
+(node:26379) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for anthropic: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:26392) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Claude) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:26437) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+WARNING:apscheduler.scheduler:Execution of job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:26:00 PST)" skipped: maximum number of running instances reached (1)
+INFO:     Shutting down
+WARNING:balance.poller:ElevenLabs API check failed, falling back to browser: 
+INFO:     Waiting for background tasks to complete. (CTRL+C to force quit)
+(node:26473) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+INFO:__main__:Resource polling job completed
+INFO:apscheduler.executors.default:Job "_resource_poll_job (trigger: cron[minute='*'], next run at: 2026-03-04 21:27:00 PST)" executed successfully
+(node:26516) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP sync scrape (Codex) failed: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+(node:26529) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+WARNING:balance.poller:CDP provider scrape failed for minimax: BrowserType.connect_over_cdp: connect ECONNREFUSED 127.0.0.1:9222
+Call log:
+  - <ws preparing> retrieving websocket url from http://127.0.0.1:9222
+
+INFO:     Waiting for application shutdown.
+INFO:__main__:Stopping file watcher...
+INFO:apscheduler.scheduler:Scheduler has been shut down
+INFO:     Application shutdown complete.
+INFO:     Finished server process [25375]

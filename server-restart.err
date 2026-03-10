@@ -1,0 +1,35 @@
+INFO:     Started server process [16572]
+INFO:     Waiting for application startup.
+INFO:__main__:Scanning session files...
+WARNING:parsers.openclaw_reader:Sessions directory does not exist: /home/aiagents/.openclaw/agents/main/sessions
+ERROR:    Traceback (most recent call last):
+  File "C:\Python314\Lib\site-packages\starlette\routing.py", line 738, in lifespan
+    async with self.lifespan_context(app) as maybe_state:
+               ~~~~~~~~~~~~~~~~~~~~~^^^^^
+  File "C:\Python314\Lib\contextlib.py", line 214, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\AI-Agents\.openclaw\projects\API-Useage-Dashboard\app.py", line 275, in lifespan
+    observer.start()
+    ~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\site-packages\watchdog\observers\api.py", line 264, in start
+    emitter.start()
+    ~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\site-packages\watchdog\utils\__init__.py", line 75, in start
+    self.on_thread_start()
+    ~~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Python314\Lib\site-packages\watchdog\observers\read_directory_changes.py", line 49, in on_thread_start
+    self._whandle = get_directory_handle(self.watch.path)
+                    ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "C:\Python314\Lib\site-packages\watchdog\observers\winapi.py", line 298, in get_directory_handle
+    return CreateFileW(
+        path,
+    ...<5 lines>...
+        None,
+    )
+  File "C:\Python314\Lib\site-packages\watchdog\observers\winapi.py", line 94, in _errcheck_handle
+    raise ctypes.WinError()  # type: ignore[attr-defined]
+    ^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [WinError 3] The system cannot find the path specified.
+
+ERROR:    Application startup failed. Exiting.

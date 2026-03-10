@@ -1,0 +1,11 @@
+[2026-03-05] ---- Run requested ----
+[2026-03-05] Checking for existing listener on port 8050.
+[2026-03-05] Port 8050 in use by PID 21140. Stopping existing process.
+[2026-03-05] Failed to stop PID 21140 (may have already exited).
+[2026-03-05] Starting app.py in hidden background process.
+[2026-03-05] Started server process. PID=17828.
+[2026-03-05] Server is listening on port 8050. Startup successful.
+[2026-03-05] Server stopped. PID=17828.
+[2026-03-05 06:27:43] ---- Run requested ----
+[2026-03-05 06:27:43] Checking for existing listener on port 8050.
+[2026-03-05 06:27:44] Starting app.py in hidden background process.

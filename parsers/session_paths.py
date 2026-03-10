@@ -43,7 +43,7 @@ def _openclaw_candidates() -> Iterable[str]:
             break
 
     # Common hard-coded machine path used in this repo docs.
-    yield "/mnt/c/Users/AI-Agents/.openclaw/agents/main/sessions"
+    yield "/home/agents/openclaw-local/core/agents/main/sessions"
 
 
 def resolve_sessions_dir(configured: Optional[str]) -> str:
