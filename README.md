@@ -5,17 +5,40 @@ Real-time token usage and cost tracking for all LLMs used via OpenClaw.
 ## Quick Start
 
 ```batch
-cd /home/agents/openclaw-local/core/projects/API-Useage-Dashboard
-run-persistent.bat
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/start-dashboard.ps1 -OpenBrowser
 ```
 
 Dashboard runs at **http://127.0.0.1:8050**
+
+## Windows / WSL Migration Setup
+
+Run the dashboard on Windows so it can reach:
+
+- browser CDP at `127.0.0.1:9222`
+- `C:\Users\Agents\.claude\.credentials.json`
+- `C:\Users\Agents\.codex\sessions`
+
+while still reading OpenClaw session JSONL files from WSL over:
+
+- `\\wsl.localhost\Ubuntu-24.04\home\agents\openclaw-local\core\agents\main\sessions`
+
+Versioned helper scripts live in `scripts/windows/`:
+
+- `start-dashboard.ps1`
+- `stop-dashboard.ps1`
+- `install-autostart.ps1`
+
+To install background auto-start at logon and create desktop launchers:
+
+```batch
+PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/install-autostart.ps1
+```
 
 ## How to Run
 
 | Method | Command | Use When |
 |--------|---------|----------|
-| **Persistent (recommended)** | `run-persistent.bat` | Normal use â€” auto-restarts on crash |
+| **Persistent (recommended)** | `PowerShell -NoProfile -ExecutionPolicy Bypass -File scripts/windows/start-dashboard.ps1` | Normal Windows use |
 | **One-shot** | `python app.py` | Debugging â€” exits on crash |
 | **Via uvicorn** | `python -m uvicorn app:app --host 127.0.0.1 --port 8050` | Development |
 

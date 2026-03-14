@@ -19,6 +19,49 @@ def _wsl_path_from_windows(raw: str) -> Optional[str]:
     return f"/mnt/{drive}/{remainder}"
 
 
+def _windows_path_from_wsl_mount(raw: str) -> Optional[str]:
+    """Convert /mnt/c/Users/... style path to C:\\Users\\... when possible."""
+    if not raw or not raw.startswith("/mnt/") or len(raw) < 7:
+        return None
+    drive = raw[5:6]
+    if not drive.isalpha() or raw[6:7] != "/":
+        return None
+    remainder = raw[7:].replace("/", "\\")
+    return f"{drive.upper()}:\\{remainder}"
+
+
+def _wsl_unc_from_linux(raw: str) -> Iterable[str]:
+    """Convert /home/... style WSL paths to \\\\wsl.localhost\\<distro>\\... candidates."""
+    if not raw or not raw.startswith("/"):
+        return []
+    distros: list[str] = []
+    preferred = os.environ.get("OPENCLAW_WSL_DISTRO")
+    if preferred:
+        distros.append(preferred)
+    for name in ("Ubuntu-24.04", "Ubuntu"):
+        if name not in distros:
+            distros.append(name)
+
+    suffix = raw.lstrip("/").replace("/", "\\")
+    return [f"\\\\wsl.localhost\\{distro}\\{suffix}" for distro in distros]
+
+
+def _candidate_variants(raw: Optional[str]) -> list[str]:
+    """Expand a raw candidate into runtime-specific variants."""
+    if not raw:
+        return []
+
+    variants = [raw]
+    for converted in (
+        _wsl_path_from_windows(raw),
+        _windows_path_from_wsl_mount(raw),
+    ):
+        if converted:
+            variants.append(converted)
+    variants.extend(_wsl_unc_from_linux(raw))
+    return variants
+
+
 def _openclaw_candidates() -> Iterable[str]:
     """Generate likely OpenClaw sessions directories for local/dev environments."""
     home = Path.home()
@@ -58,25 +101,18 @@ def resolve_sessions_dir(configured: Optional[str]) -> str:
     """
     candidates: list[str] = []
 
-    if configured:
-        candidates.append(configured)
-
     env_path = os.environ.get("SESSIONS_DIR")
-    if env_path:
-        candidates.append(env_path)
+    for raw in (env_path, configured):
+        candidates.extend(_candidate_variants(raw))
 
-    for raw in (configured, env_path):
-        wsl = _wsl_path_from_windows(raw or "")
-        if wsl:
-            candidates.append(wsl)
-
-    candidates.extend(_openclaw_candidates())
+    for raw in _openclaw_candidates():
+        candidates.extend(_candidate_variants(raw))
 
     seen = set()
     for candidate in candidates:
         if not candidate:
             continue
-        norm = str(Path(candidate))
+        norm = os.path.normpath(candidate)
         if norm in seen:
             continue
         seen.add(norm)
@@ -87,4 +123,4 @@ def resolve_sessions_dir(configured: Optional[str]) -> str:
             continue
 
     # Fall back to configured value for transparency if nothing exists.
-    return configured or env_path or "/root/.openclaw/agents/main/sessions"
+    return env_path or configured or "/root/.openclaw/agents/main/sessions"

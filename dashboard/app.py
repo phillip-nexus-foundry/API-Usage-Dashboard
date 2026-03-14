@@ -9,6 +9,7 @@ Three tiers:
 """
 import asyncio
 import logging
+import os
 import yaml
 from pathlib import Path
 from contextlib import asynccontextmanager
@@ -28,6 +29,13 @@ CONFIG_PATH = PROJECT_ROOT / "config.yaml"
 def _load_config() -> dict:
     with open(CONFIG_PATH) as f:
         return yaml.safe_load(f)
+
+
+def _resolve_runtime_dir(env_name: str, default_path: Path) -> Path:
+    raw = os.environ.get(env_name)
+    path = Path(raw) if raw else default_path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def create_app() -> FastAPI:
@@ -88,13 +96,12 @@ def create_app() -> FastAPI:
     balance_poller = None
     try:
         from balance.poller import BalancePoller
-        # Use /app/data/ for persistent storage (Docker volume mount)
-        data_dir = PROJECT_ROOT / "data"
-        data_dir.mkdir(exist_ok=True)
+        data_dir = _resolve_runtime_dir("DASHBOARD_DATA_DIR", PROJECT_ROOT / "data")
+        profiles_dir = _resolve_runtime_dir("DASHBOARD_BROWSER_PROFILES_DIR", PROJECT_ROOT / "browser_profiles")
         balance_poller = BalancePoller(
             config,
             db_path=str(data_dir / "dashboard.db"),
-            profiles_dir=str(PROJECT_ROOT / "browser_profiles"),
+            profiles_dir=str(profiles_dir),
             config_path=str(CONFIG_PATH),
             alert_threshold_pct=5.0,
             autocorrect_threshold_pct=10.0,
